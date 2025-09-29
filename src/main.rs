@@ -1,15 +1,9 @@
 use clap::{Parser, Subcommand};
-use anyhow::Result;
-
-mod storage;
-mod commands;
-
-use commands::{list_projects, open_project, start_brainstorm};
 
 #[derive(Parser)]
 #[command(name = "bindr")]
-#[command(about = "Multi-agent LLM workflow orchestration for builders")]
-#[command(version)]
+#[command(version = "0.1.0")]
+#[command(about = "Multi-agent LLM workflow orchestration", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -17,31 +11,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List all existing projects
+    /// List all projects
     List,
     /// Open an existing project
-    Open {
-        /// Name of the project to open
-        project_name: String,
-    },
+    Open { name: String },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::List) => {
-            list_projects().await?;
-        }
-        Some(Commands::Open { project_name }) => {
-            open_project(&project_name).await?;
-        }
         None => {
-            // Default behavior: start brainstorm mode
-            start_brainstorm().await?;
+            // bindr with no args = smart detection
+            println!("🚀 Launching Bindr...");
+            println!("(Smart directory detection coming soon!)");
+        }
+        Some(Commands::List) => {
+            println!("📋 Your Bindr projects:");
+            println!("(No projects yet)");
+        }
+        Some(Commands::Open { name }) => {
+            println!("📂 Opening project: {}", name);
+            println!("(Not implemented yet)");
         }
     }
-
-    Ok(())
 }
