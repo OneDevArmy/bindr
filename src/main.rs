@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::fs;
 
 #[derive(Parser)]
 #[command(name = "bindr")]
@@ -17,6 +19,44 @@ enum Commands {
     Open { name: String },
 }
 
+fn get_bindr_projects_path() -> PathBuf {
+    let home = dirs::home_dir().expect("Could not find home directory");
+    home.join(".bindr").join("projects")
+}
+
+fn list_projects() {
+    let projects_path = get_bindr_projects_path();
+    
+    // Check if the directory exists
+    if !projects_path.exists() {
+        println!("📭 No projects yet. Run 'bindr' to start your first project!");
+        return;
+    }
+    
+    // Try to read the directory
+    match fs::read_dir(&projects_path) {
+        Ok(entries) => {
+            let projects: Vec<_> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect();
+            
+            if projects.is_empty() {
+                println!("📭 No projects yet. Run 'bindr' to start your first project!");
+            } else {
+                println!("📋 Your Bindr projects:\n");
+                for project in projects {
+                    println!("  • {}", project);
+                }
+            }
+        }
+        Err(_) => {
+            println!("📭 No projects yet. Run 'bindr' to start your first project!");
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -27,8 +67,7 @@ fn main() {
             println!("(Smart directory detection coming soon!)");
         }
         Some(Commands::List) => {
-            println!("📋 Your Bindr projects:");
-            println!("(No projects yet)");
+            list_projects();
         }
         Some(Commands::Open { name }) => {
             println!("📂 Opening project: {}", name);
