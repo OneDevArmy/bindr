@@ -1,0 +1,13 @@
+[package]
+name = "bindr"
+version = "0.0.1"
+edition = "2024"
+authors = ["Your Name "]
+description = "Multi-agent LLM workflow orchestration for builders"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OneDevArmy/bindr"
+readme = "README.md"
+keywords = ["cli", "llm", "workflow", "ai", "agent"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
