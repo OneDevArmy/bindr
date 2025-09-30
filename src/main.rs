@@ -14,16 +14,21 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 mod events;
 mod config;
 mod session;
+mod llm;
+mod streaming;
+mod agent;
+mod ui;
 
-use events::AppEvent;
+use events::{AppEvent, BindrMode};
 use config::Config;
 use session::SessionManager;
+use agent::AgentManager;
+use ui::conversation::ConversationManager;
 
 // Dark mode color palette
 const BG_PRIMARY: Color = Color::Rgb(16, 18, 24);      // Deep blue-black
@@ -53,9 +58,14 @@ enum Commands {
     Open { name: String },
 }
 
+#[allow(dead_code)]
 enum AppView {
     Home,
+    SelectProvider,
     AddKey,
+    SelectModel,
+    CustomModelInput,
+    Conversation,
     Brainstorm,
     Plan,
     Execute,
@@ -65,23 +75,48 @@ enum AppView {
 struct App {
     view: AppView,
     key_input: String,
+    custom_model_input: String,
     config: Config,
+    #[allow(dead_code)]
     session_manager: SessionManager,
+    agent_manager: AgentManager,
+    conversation_manager: Option<ConversationManager>,
+    #[allow(dead_code)]
     app_event_tx: mpsc::UnboundedSender<AppEvent>,
+    #[allow(dead_code)]
     app_event_rx: mpsc::UnboundedReceiver<AppEvent>,
+    // Selection state
+    provider_selection: usize,
+    model_selection: usize,
+    // Conversation state
+    #[allow(dead_code)]
+    conversation_lines: Vec<ratatui::text::Line<'static>>,
+    #[allow(dead_code)]
+    is_streaming: bool,
+    #[allow(dead_code)]
+    current_input: String,
 }
 
 impl App {
     fn new(config: Config, session_manager: SessionManager) -> (Self, mpsc::UnboundedSender<AppEvent>) {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
+        let agent_manager = AgentManager::new(config.clone(), session_manager.clone());
         
         let app = App {
             view: AppView::Home,
             key_input: String::new(),
+            custom_model_input: String::new(),
             config,
             session_manager,
+            agent_manager,
+            conversation_manager: None,
             app_event_tx: app_event_tx.clone(),
             app_event_rx,
+            provider_selection: 0,
+            model_selection: 0,
+            conversation_lines: Vec::new(),
+            is_streaming: false,
+            current_input: String::new(),
         };
         
         (app, app_event_tx)
@@ -90,12 +125,31 @@ impl App {
     fn get_usage_info(&self) -> (u32, u32) {
         self.config.get_usage_info()
     }
+
+    /// Start a new conversation
+    fn start_new_conversation(&mut self) {
+        if !self.config.has_api_key() {
+            // No API key configured, go to provider selection
+            self.view = AppView::SelectProvider;
+            return;
+        }
+
+        // Create conversation manager
+        let llm_client = crate::llm::LlmClient::new(self.config.clone());
+        let mut conversation_manager = ConversationManager::new(
+            self.agent_manager.clone(),
+            llm_client,
+            BindrMode::Brainstorm,
+        );
+
+        // Start the conversation
+        conversation_manager.start_conversation();
+
+        self.conversation_manager = Some(conversation_manager);
+        self.view = AppView::Conversation;
+    }
 }
 
-fn get_bindr_projects_path() -> PathBuf {
-    let home = dirs::home_dir().expect("Could not find home directory");
-    home.join(".bindr").join("projects")
-}
 
 async fn list_projects() -> anyhow::Result<()> {
     let config = Config::load()?;
@@ -226,8 +280,8 @@ fn draw_home_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &Ap
         Line::from(vec![
             Span::styled(" [K] ", Style::default().fg(BG_PRIMARY).bg(ACCENT_YELLOW).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled("Add OpenRouter API key", Style::default().fg(TEXT_PRIMARY)),
-            Span::styled(" (unlimited access)", Style::default().fg(ACCENT_GREEN)),
+            Span::styled("Add API key", Style::default().fg(TEXT_PRIMARY)),
+            //Span::styled(" (unlimited access)", Style::default().fg(ACCENT_GREEN)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -258,20 +312,80 @@ fn draw_home_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &Ap
     let footer_text = vec![
         if app.config.has_api_key() {
             Line::from(vec![
-                Span::styled("Unlimited access enabled", Style::default().fg(ACCENT_GREEN)),
+                Span::styled("API key configured", Style::default().fg(ACCENT_GREEN)),
                 Span::styled(" • Press ", Style::default().fg(TEXT_SECONDARY)),
                 Span::styled("K", Style::default().fg(ACCENT_YELLOW).add_modifier(Modifier::BOLD)),
-                Span::styled(" to manage API key", Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(" to manage API keys", Style::default().fg(TEXT_SECONDARY)),
             ])
         } else {
             Line::from(vec![
-                Span::styled("Using free tier with ", Style::default().fg(TEXT_SECONDARY)),
-                Span::styled("limited models", Style::default().fg(ACCENT_YELLOW)),
+                Span::styled("No API key configured", Style::default().fg(TEXT_SECONDARY)),
                 Span::styled(" • Press ", Style::default().fg(TEXT_SECONDARY)),
                 Span::styled("K", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
-                Span::styled(" to unlock full access", Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(" to add API key", Style::default().fg(TEXT_SECONDARY)),
             ])
         }
+    ];
+    
+    let footer = Paragraph::new(footer_text)
+        .style(Style::default().bg(BG_SECONDARY))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(footer, chunks[2]);
+}
+
+fn draw_select_provider_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
+    let providers = app.config.get_providers();
+    let mut items = Vec::new();
+    
+    for (i, (id, provider)) in providers.iter().enumerate() {
+        let style = if i == app.provider_selection {
+            Style::default().fg(ACCENT_BLUE).bg(BG_SECONDARY)
+        } else {
+            Style::default().fg(TEXT_PRIMARY)
+        };
+        
+        let has_key = app.config.api_keys.contains_key(*id) || 
+            provider.api_key_env.as_ref()
+                .map(|env| std::env::var(env).is_ok())
+                .unwrap_or(false);
+        
+        let status = if has_key {
+            "✓"
+        } else {
+            "○"
+        };
+        
+        items.push(Line::from(vec![
+            Span::styled(format!("{} ", status), Style::default().fg(if has_key { ACCENT_GREEN } else { TEXT_SECONDARY })),
+            Span::styled(provider.name.clone(), style),
+        ]));
+    }
+    
+    let content = Paragraph::new(items)
+        .style(Style::default().bg(BG_PRIMARY))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+                .title(Span::styled(" Select Provider ", Style::default().fg(ACCENT_BLUE)))
+        );
+    f.render_widget(content, chunks[1]);
+    
+    // Footer
+    let footer_text = vec![
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" navigate • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Enter", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" select • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Esc", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(" back", Style::default().fg(TEXT_SECONDARY)),
+        ]),
     ];
     
     let footer = Paragraph::new(footer_text)
@@ -298,10 +412,13 @@ fn draw_add_key_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: 
     f.render_widget(header, chunks[0]);
 
     // Main content
+    let current_provider = app.config.get_current_provider();
+    let provider_name = current_provider.map(|p| p.name.as_str()).unwrap_or("Unknown");
+    
     let key_text = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "Add OpenRouter API Key",
+            format!("Add {} API Key", provider_name),
             Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -330,7 +447,7 @@ fn draw_add_key_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: 
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
-            "Press Enter to save • ESC to cancel",
+            "Press Enter to save and select model • ESC to cancel",
             Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::ITALIC),
         )),
         Line::from(""),
@@ -356,6 +473,151 @@ fn draw_add_key_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: 
 
     // Footer
     let footer = Paragraph::new("Your API key is stored locally and never shared")
+        .style(Style::default().fg(TEXT_SECONDARY).bg(BG_SECONDARY))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(footer, chunks[2]);
+}
+
+fn draw_select_model_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
+    let current_provider = app.config.get_current_provider();
+    let mut items = Vec::new();
+    
+    if let Some(provider) = current_provider {
+        for (i, model) in provider.models.iter().enumerate() {
+            let style = if i == app.model_selection {
+                Style::default().fg(ACCENT_BLUE).bg(BG_SECONDARY)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+            
+            let premium_indicator = if model.is_premium {
+                "💎 "
+            } else {
+                "🆓 "
+            };
+            
+            items.push(Line::from(vec![
+                Span::styled(premium_indicator, Style::default().fg(if model.is_premium { ACCENT_YELLOW } else { ACCENT_GREEN })),
+                Span::styled(model.name.clone(), style),
+                Span::styled(format!(" - {}", model.description), Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+    }
+    
+    let content = Paragraph::new(items)
+        .style(Style::default().bg(BG_PRIMARY))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+                .title(Span::styled(" Select Model ", Style::default().fg(ACCENT_BLUE)))
+        );
+    f.render_widget(content, chunks[1]);
+    
+    // Footer
+    let footer_text = vec![
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" navigate • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Enter", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" select • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Esc", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(" back", Style::default().fg(TEXT_SECONDARY)),
+        ]),
+    ];
+    
+    let footer = Paragraph::new(footer_text)
+        .style(Style::default().bg(BG_SECONDARY))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(footer, chunks[2]);
+}
+
+fn draw_custom_model_input_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
+    // Header
+    let header = Paragraph::new("Bindr")
+        .style(Style::default().fg(ACCENT_BLUE).bg(BG_SECONDARY).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(header, chunks[0]);
+
+    // Main content
+    let content_text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter Custom OpenRouter Model Name",
+            Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Examples:",
+            Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  • meta-llama/llama-3.1-8b-instruct",
+            Style::default().fg(TEXT_SECONDARY),
+        )),
+        Line::from(Span::styled(
+            "  • microsoft/phi-3-medium-128k-instruct",
+            Style::default().fg(TEXT_SECONDARY),
+        )),
+        Line::from(Span::styled(
+            "  • google/gemini-1.5-flash",
+            Style::default().fg(TEXT_SECONDARY),
+        )),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled("Model Name:", Style::default().fg(TEXT_PRIMARY))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                if app.custom_model_input.is_empty() { 
+                    "model-name-here".to_string() 
+                } else { 
+                    app.custom_model_input.clone() 
+                },
+                Style::default()
+                    .fg(if app.custom_model_input.is_empty() { TEXT_SECONDARY } else { ACCENT_GREEN })
+                    .bg(BG_SECONDARY)
+            ),
+            Span::styled(" _", Style::default().fg(ACCENT_BLUE)),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Enter to save • ESC to cancel",
+            Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    let content = Paragraph::new(content_text)
+        .style(Style::default().bg(BG_PRIMARY))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+                .title(Span::styled(" Custom Model ", Style::default().fg(ACCENT_YELLOW)))
+        );
+    f.render_widget(content, chunks[1]);
+
+    // Footer
+    let footer = Paragraph::new("Enter any model name available on OpenRouter")
         .style(Style::default().fg(TEXT_SECONDARY).bg(BG_SECONDARY))
         .alignment(Alignment::Center)
         .block(
@@ -418,6 +680,12 @@ fn draw_document_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, _app
     f.render_widget(content, chunks[1]);
 }
 
+fn draw_conversation_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
+    if let Some(ref conversation_manager) = app.conversation_manager {
+        f.render_widget(conversation_manager.clone(), chunks[1]);
+    }
+}
+
 async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         terminal.draw(|f| {
@@ -436,7 +704,11 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
 
             match app.view {
                 AppView::Home => draw_home_view::<B>(f, app, chunks.to_vec()),
+                AppView::SelectProvider => draw_select_provider_view::<B>(f, app, chunks.to_vec()),
                 AppView::AddKey => draw_add_key_view::<B>(f, app, chunks.to_vec()),
+                AppView::SelectModel => draw_select_model_view::<B>(f, app, chunks.to_vec()),
+                AppView::CustomModelInput => draw_custom_model_input_view::<B>(f, app, chunks.to_vec()),
+                AppView::Conversation => draw_conversation_view::<B>(f, app, chunks.to_vec()),
                 AppView::Brainstorm => draw_brainstorm_view::<B>(f, app, chunks.to_vec()),
                 AppView::Plan => draw_plan_view::<B>(f, app, chunks.to_vec()),
                 AppView::Execute => draw_execute_view::<B>(f, app, chunks.to_vec()),
@@ -450,14 +722,14 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                     AppView::Home => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
                         KeyCode::Char('n') | KeyCode::Char('N') => {
-                            app.view = AppView::Brainstorm;
+                            app.start_new_conversation();
                         }
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             // TODO: Show projects
                             return Ok(());
                         }
                         KeyCode::Char('k') | KeyCode::Char('K') => {
-                            app.view = AppView::AddKey;
+                            app.view = AppView::SelectProvider;
                         }
                         _ => {}
                     },
@@ -468,10 +740,20 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                         }
                         KeyCode::Enter => {
                             if !app.key_input.is_empty() {
-                                // TODO: Save API key
-                                app.view = AppView::Home;
+                                let provider_id = app.config.selected_provider.clone();
+                                app.config.set_api_key(provider_id, app.key_input.clone());
+                                
+                                // Save the config with the new API key
+                                if let Err(e) = app.config.save() {
+                                    eprintln!("Failed to save config: {}", e);
+                                }
+                                
+                                app.view = AppView::SelectModel;
                                 app.key_input.clear();
                             }
+                        }
+                        KeyCode::Char('m') | KeyCode::Char('M') => {
+                            app.view = AppView::SelectModel;
                         }
                         KeyCode::Char(c) => {
                             app.key_input.push(c);
@@ -480,6 +762,131 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                             app.key_input.pop();
                         }
                         _ => {}
+                    },
+                    AppView::SelectProvider => match key.code {
+                        KeyCode::Up => {
+                            if app.provider_selection > 0 {
+                                app.provider_selection -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            let providers = app.config.get_providers();
+                            if app.provider_selection < providers.len().saturating_sub(1) {
+                                app.provider_selection += 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let providers = app.config.get_providers();
+                            if let Some((provider_id, _)) = providers.get(app.provider_selection) {
+                                let provider_id_str = provider_id.to_string();
+                                
+                                // Check if API key already exists for this provider
+                                let has_api_key = app.config.api_keys.contains_key(*provider_id) || 
+                                   app.config.get_current_provider()
+                                       .and_then(|p| p.api_key_env.as_ref())
+                                       .map(|env| std::env::var(env).is_ok())
+                                       .unwrap_or(false);
+                                
+                                // Now we can safely mutate config
+                                app.config.set_selected_provider(provider_id_str);
+                                
+                                if has_api_key {
+                                    // API key exists, go directly to model selection
+                                    app.view = AppView::SelectModel;
+                                } else {
+                                    // No API key, go to add key
+                                    app.view = AppView::AddKey;
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.view = AppView::Home;
+                        }
+                        _ => {}
+                    },
+                    AppView::SelectModel => match key.code {
+                        KeyCode::Up => {
+                            if app.model_selection > 0 {
+                                app.model_selection -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(provider) = app.config.get_current_provider() {
+                                if app.model_selection < provider.models.len().saturating_sub(1) {
+                                    app.model_selection += 1;
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(provider) = app.config.get_current_provider() {
+                                if let Some(model) = provider.models.get(app.model_selection) {
+                                    if model.id == "custom-model" {
+                                        app.view = AppView::CustomModelInput;
+                                    } else {
+                                        app.config.default_model = model.id.clone();
+                                        
+                                        // Save the config with the new model
+                                        if let Err(e) = app.config.save() {
+                                            eprintln!("Failed to save config: {}", e);
+                                        }
+                                        
+                                        app.view = AppView::Home;
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.view = AppView::SelectProvider;
+                        }
+                        _ => {}
+                    },
+                    AppView::CustomModelInput => match key.code {
+                        KeyCode::Esc => {
+                            app.view = AppView::SelectModel;
+                            app.custom_model_input.clear();
+                        }
+                        KeyCode::Enter => {
+                            if !app.custom_model_input.is_empty() {
+                                app.config.set_custom_model(app.custom_model_input.clone());
+                                
+                                // Save the config with the custom model
+                                if let Err(e) = app.config.save() {
+                                    eprintln!("Failed to save config: {}", e);
+                                }
+                                
+                                app.view = AppView::Home;
+                                app.custom_model_input.clear();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            app.custom_model_input.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.custom_model_input.pop();
+                        }
+                        _ => {}
+                    },
+                    AppView::Conversation => {
+                        if let Some(ref mut conversation_manager) = app.conversation_manager {
+                            // Handle input in conversation (including slash commands)
+                            match conversation_manager.handle_key(key).await {
+                                Ok(action) => {
+                                    match action {
+                                        crate::ui::conversation::manager::ConversationAction::GoHome => {
+                                            app.view = AppView::Home;
+                                            app.conversation_manager = None;
+                                        }
+                                        crate::ui::conversation::manager::ConversationAction::Exit => {
+                                            return Ok(());
+                                        }
+                                        crate::ui::conversation::manager::ConversationAction::None => {}
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Error handling input: {}", e);
+                                }
+                            }
+                        }
                     },
                     _ => {
                         // Handle other views

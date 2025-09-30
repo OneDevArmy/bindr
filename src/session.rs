@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::events::{BindrMode, ProjectState, SessionInfo, ConversationEntry, ConversationRole};
 
 /// Session manager for handling project state and persistence
+#[derive(Clone)]
 pub struct SessionManager {
     config: Config,
     current_session: Option<ActiveSession>,
@@ -16,10 +17,15 @@ pub struct SessionManager {
 }
 
 /// Active session with runtime state
+#[derive(Clone)]
 pub struct ActiveSession {
+    #[allow(dead_code)]
     pub session_id: String,
+    #[allow(dead_code)]
     pub project_state: ProjectState,
+    #[allow(dead_code)]
     pub is_dirty: bool,
+    #[allow(dead_code)]
     pub last_save: DateTime<Utc>,
 }
 
@@ -61,6 +67,7 @@ impl SessionManager {
     }
     
     /// Create a new project and session
+    #[allow(dead_code)]
     pub fn create_project(&mut self, name: String, project_path: PathBuf) -> Result<String> {
         let session_id = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -87,6 +94,8 @@ impl SessionManager {
             last_modified: now.to_rfc3339(),
             bindr_md_content: initial_content,
             conversation_history: Vec::new(),
+            conversation_count: 0,
+            last_activity: now,
         };
         
         // Create session info
@@ -94,8 +103,8 @@ impl SessionManager {
             project_name: name,
             current_mode: BindrMode::Brainstorm,
             session_id: session_id.clone(),
-            created_at: now.to_rfc3339(),
-            last_activity: now.to_rfc3339(),
+            created_at: now,
+            last_activity: now,
         };
         
         // Save session info
@@ -140,16 +149,19 @@ impl SessionManager {
     }
     
     /// Get current session
+    #[allow(dead_code)]
     pub fn current_session(&self) -> Option<&ActiveSession> {
         self.current_session.as_ref()
     }
     
     /// Get current session mutably
+    #[allow(dead_code)]
     pub fn current_session_mut(&mut self) -> Option<&mut ActiveSession> {
         self.current_session.as_mut()
     }
     
     /// Save current session
+    #[allow(dead_code)]
     pub fn save_current_session(&mut self) -> Result<()> {
         // Extract data from current session to avoid borrow checker issues
         let (project_state, session_id, current_mode) = if let Some(session) = &self.current_session {
@@ -167,7 +179,7 @@ impl SessionManager {
         
         // Update session info
         if let Some(session_info) = self.sessions.get_mut(&session_id) {
-            session_info.last_activity = Utc::now().to_rfc3339();
+            session_info.last_activity = Utc::now();
             session_info.current_mode = current_mode;
             let session_info_clone = session_info.clone();
             self.save_session_info(&session_info_clone)?;
@@ -183,13 +195,14 @@ impl SessionManager {
     }
     
     /// Add conversation entry to current session
+    #[allow(dead_code)]
     pub fn add_conversation_entry(&mut self, role: ConversationRole, content: String, mode: BindrMode) -> Result<()> {
         if let Some(session) = &mut self.current_session {
             let entry = ConversationEntry {
                 mode,
                 role,
                 content,
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: Utc::now(),
             };
             
             session.project_state.conversation_history.push(entry);
@@ -200,6 +213,7 @@ impl SessionManager {
     }
     
     /// Switch mode in current session
+    #[allow(dead_code)]
     pub fn switch_mode(&mut self, mode: BindrMode) -> Result<()> {
         if let Some(session) = &mut self.current_session {
             session.project_state.current_mode = mode;
@@ -232,15 +246,18 @@ impl SessionManager {
                 name: session_info.project_name.clone(),
                 path: self.config.projects_dir.join(&session_info.project_name),
                 current_mode: session_info.current_mode,
-                created_at: session_info.created_at.clone(),
-                last_modified: session_info.last_activity.clone(),
+                created_at: session_info.created_at.to_rfc3339(),
+                last_modified: session_info.last_activity.to_rfc3339(),
                 bindr_md_content: String::new(),
                 conversation_history: Vec::new(),
+                conversation_count: 0,
+                last_activity: session_info.last_activity,
             })
         }
     }
     
     /// Save project state to disk
+    #[allow(dead_code)]
     fn save_project_state(&self, project_state: &ProjectState) -> Result<()> {
         let project_dir = self.config.projects_dir.join(&project_state.name);
         fs::create_dir_all(&project_dir)
@@ -262,6 +279,7 @@ impl SessionManager {
     }
     
     /// Save session info to disk
+    #[allow(dead_code)]
     fn save_session_info(&self, session_info: &SessionInfo) -> Result<()> {
         let sessions_dir = self.config.bindr_home.join("sessions");
         fs::create_dir_all(&sessions_dir)
