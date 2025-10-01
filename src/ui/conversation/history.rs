@@ -1,3 +1,5 @@
+//! Conversation history display component
+
 use crate::events::{BindrMode, ConversationRole};
 use ratatui::{
     buffer::Buffer,
@@ -24,6 +26,7 @@ pub struct ConversationHistory {
     #[allow(dead_code)]
     scroll_state: ScrollbarState,
     max_messages: usize,
+    streaming_message: Option<String>,
 }
 
 impl ConversationHistory {
@@ -32,6 +35,7 @@ impl ConversationHistory {
             messages: VecDeque::new(),
             scroll_state: ScrollbarState::default(),
             max_messages,
+            streaming_message: None,
         }
     }
 
@@ -110,6 +114,16 @@ impl ConversationHistory {
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
+
+    /// Set the current streaming message
+    pub fn set_streaming_message(&mut self, message: String) {
+        self.streaming_message = Some(message);
+    }
+
+    /// Clear the streaming message
+    pub fn clear_streaming_message(&mut self) {
+        self.streaming_message = None;
+    }
 }
 
 impl Widget for ConversationHistory {
@@ -137,39 +151,36 @@ impl Widget for ConversationHistory {
                 }
             }
         } else {
-            // Render messages
-            let mut y_offset = 0;
-            let start_idx = 0; // TODO: Implement proper scrolling
-            
-            for (_i, message) in self.messages.iter().enumerate().skip(start_idx) {
-                if y_offset >= inner_area.height as usize {
-                    break;
-                }
+            // Collect all lines for messages (including streaming if any)
+            let mut all_lines: Vec<Line> = Vec::new();
+            for message in self.messages.iter() {
+                let mut lines = self.render_message(message, inner_area.width);
+                all_lines.append(&mut lines);
+                // spacing between messages
+                all_lines.push(Line::from(vec![Span::raw("")]))
+            }
 
-                // Render message
-                let message_lines = self.render_message(message, inner_area.width);
-                for line in message_lines {
-                    if y_offset < inner_area.height as usize {
-                        buf.set_line(inner_area.x, inner_area.y + y_offset as u16, &line, inner_area.width);
-                        y_offset += 1;
-                    }
-                }
-                
-                // Add spacing between messages
-                if y_offset < inner_area.height as usize {
-                    y_offset += 1;
-                }
+            if let Some(ref streaming_text) = self.streaming_message {
+                let mut streaming_lines = self.render_streaming_message(streaming_text, inner_area.width);
+                all_lines.append(&mut streaming_lines);
+            }
+
+            // Determine the range of lines to display from the bottom
+            let height = inner_area.height as usize;
+            let total = all_lines.len();
+            let start = total.saturating_sub(height);
+            let visible = &all_lines[start..];
+
+            for (i, line) in visible.iter().enumerate() {
+                buf.set_line(inner_area.x, inner_area.y + i as u16, line, inner_area.width);
             }
         }
 
-        // Render scrollbar
+        // Render scrollbar placeholder
         let _scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
-        
-        // Note: Scrollbar rendering is complex in ratatui, for now we'll skip it
-        // TODO: Implement proper scrollbar rendering
     }
 }
 
@@ -253,5 +264,33 @@ impl ConversationHistory {
             ConversationRole::Assistant => Style::default().fg(Color::Green),
             ConversationRole::System => Style::default().fg(Color::Yellow),
         }
+    }
+
+    /// Render a streaming message with typing indicator
+    fn render_streaming_message(&self, text: &str, width: u16) -> Vec<Line> {
+        let mut lines = Vec::new();
+        
+        // Streaming message header
+        let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
+        let header = format!("🤖 💡 {} {}", timestamp, "─".repeat(20));
+        
+        lines.push(Line::from(vec![
+            Span::styled(header, Style::default().fg(Color::DarkGray)),
+        ]));
+        
+        // Streaming content with cursor
+        let content_lines = self.wrap_text(text, width.saturating_sub(2) as usize);
+        for (i, content_line) in content_lines.iter().enumerate() {
+            let is_last_line = i == content_lines.len() - 1;
+            let cursor = if is_last_line { "▋" } else { "" };
+            
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(content_line.clone(), Style::default().fg(Color::Green)),
+                Span::styled(cursor, Style::default().fg(Color::Yellow)),
+            ]));
+        }
+        
+        lines
     }
 }

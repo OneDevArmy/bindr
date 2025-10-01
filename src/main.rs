@@ -24,6 +24,7 @@ mod streaming;
 mod agent;
 mod ui;
 
+
 use events::{AppEvent, BindrMode};
 use config::Config;
 use session::SessionManager;
@@ -66,6 +67,7 @@ enum AppView {
     SelectModel,
     CustomModelInput,
     Conversation,
+    ModelSelection,
     Brainstorm,
     Plan,
     Execute,
@@ -88,6 +90,7 @@ struct App {
     // Selection state
     provider_selection: usize,
     model_selection: usize,
+    model_switch_selection: usize,
     // Conversation state
     #[allow(dead_code)]
     conversation_lines: Vec<ratatui::text::Line<'static>>,
@@ -114,6 +117,7 @@ impl App {
             app_event_rx,
             provider_selection: 0,
             model_selection: 0,
+            model_switch_selection: 0,
             conversation_lines: Vec::new(),
             is_streaming: false,
             current_input: String::new(),
@@ -680,9 +684,106 @@ fn draw_document_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, _app
     f.render_widget(content, chunks[1]);
 }
 
-fn draw_conversation_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
-    if let Some(ref conversation_manager) = app.conversation_manager {
-        f.render_widget(conversation_manager.clone(), chunks[1]);
+fn draw_model_selection_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &App, chunks: Vec<ratatui::layout::Rect>) {
+    // Header
+    let header = Paragraph::new("Bindr")
+        .style(Style::default().fg(ACCENT_BLUE).bg(BG_SECONDARY).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(header, chunks[0]);
+
+    // Main content - show all models from all providers
+    let providers = app.config.get_providers();
+    let mut items = Vec::new();
+    let mut current_index = 0;
+    
+    // Show current model first
+    let current_provider = app.config.get_current_provider();
+    let current_model = app.config.default_model.clone();
+    
+    if let Some(provider) = current_provider {
+        if let Some(model) = provider.models.iter().find(|m| m.id == current_model) {
+            let premium_indicator = if model.is_premium { "💎 " } else { "🆓 " };
+            items.push(Line::from(vec![
+                Span::styled("→ ", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+                Span::styled(premium_indicator, Style::default().fg(if model.is_premium { ACCENT_YELLOW } else { ACCENT_GREEN })),
+                Span::styled(format!("{} ({})", model.name, provider.name), Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD)),
+                Span::styled(" - CURRENT", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+    }
+    
+    items.push(Line::from(""));
+    items.push(Line::from(Span::styled("Available Models:", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD))));
+    items.push(Line::from(""));
+    
+    // Add all models from all providers
+    for (provider_id, provider) in providers.iter() {
+        for model in &provider.models {
+            let style = if current_index == app.model_switch_selection {
+                Style::default().fg(ACCENT_BLUE).bg(BG_SECONDARY)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+            
+            let premium_indicator = if model.is_premium { "💎 " } else { "🆓 " };
+            let is_current = model.id == current_model;
+            
+            items.push(Line::from(vec![
+                Span::styled(premium_indicator, Style::default().fg(if model.is_premium { ACCENT_YELLOW } else { ACCENT_GREEN })),
+                Span::styled(model.name.clone(), style),
+                Span::styled(format!(" ({})", provider.name), Style::default().fg(TEXT_SECONDARY)),
+                if is_current {
+                    Span::styled(" - CURRENT", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+            current_index += 1;
+        }
+    }
+    
+    let content = Paragraph::new(items)
+        .style(Style::default().bg(BG_PRIMARY))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+                .title(Span::styled(" Switch Model ", Style::default().fg(ACCENT_BLUE)))
+        );
+    f.render_widget(content, chunks[1]);
+    
+    // Footer
+    let footer_text = vec![
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" navigate • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Enter", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" select • ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled("Esc", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(" back to conversation", Style::default().fg(TEXT_SECONDARY)),
+        ]),
+    ];
+    
+    let footer = Paragraph::new(footer_text)
+        .style(Style::default().bg(BG_SECONDARY))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_COLOR))
+        );
+    f.render_widget(footer, chunks[2]);
+}
+
+fn draw_conversation_view<B: ratatui::backend::Backend>(f: &mut ratatui::Frame, app: &mut App, chunks: Vec<ratatui::layout::Rect>) {
+    if let Some(ref mut conversation_manager) = app.conversation_manager {
+        // Render conversation manager components individually
+        conversation_manager.render_conversation_ui(chunks[1], f.buffer_mut());
     }
 }
 
@@ -709,6 +810,7 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                 AppView::SelectModel => draw_select_model_view::<B>(f, app, chunks.to_vec()),
                 AppView::CustomModelInput => draw_custom_model_input_view::<B>(f, app, chunks.to_vec()),
                 AppView::Conversation => draw_conversation_view::<B>(f, app, chunks.to_vec()),
+                AppView::ModelSelection => draw_model_selection_view::<B>(f, app, chunks.to_vec()),
                 AppView::Brainstorm => draw_brainstorm_view::<B>(f, app, chunks.to_vec()),
                 AppView::Plan => draw_plan_view::<B>(f, app, chunks.to_vec()),
                 AppView::Execute => draw_execute_view::<B>(f, app, chunks.to_vec()),
@@ -716,7 +818,13 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
             }
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Process streaming chunks for conversation
+        if let Some(ref mut conversation_manager) = app.conversation_manager {
+            conversation_manager.process_streaming_chunks();
+        }
+
+        // Handle keyboard input with a short timeout to keep the loop responsive
+        if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match app.view {
                     AppView::Home => match key.code {
@@ -879,6 +987,10 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                                         crate::ui::conversation::manager::ConversationAction::Exit => {
                                             return Ok(());
                                         }
+                                        crate::ui::conversation::manager::ConversationAction::ShowModelSelection => {
+                                            app.view = AppView::ModelSelection;
+                                            app.model_switch_selection = 0;
+                                        }
                                         crate::ui::conversation::manager::ConversationAction::None => {}
                                     }
                                 }
@@ -887,6 +999,62 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                                 }
                             }
                         }
+                    },
+                    AppView::ModelSelection => match key.code {
+                        KeyCode::Up => {
+                            if app.model_switch_selection > 0 {
+                                app.model_switch_selection -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            let providers = app.config.get_providers();
+                            let total_models: usize = providers.iter()
+                                .map(|(_, provider)| provider.models.len())
+                                .sum();
+                            if app.model_switch_selection < total_models.saturating_sub(1) {
+                                app.model_switch_selection += 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            // Find the selected model across all providers
+                            let providers = app.config.get_providers();
+                            let mut current_index = 0;
+                            let mut selected_provider_id = None;
+                            let mut selected_model_id = None;
+                            
+                            for (provider_id, provider) in providers.iter() {
+                                for model in &provider.models {
+                                    if current_index == app.model_switch_selection {
+                                        selected_provider_id = Some(provider_id.to_string());
+                                        selected_model_id = Some(model.id.clone());
+                                        break;
+                                    }
+                                    current_index += 1;
+                                }
+                                if selected_provider_id.is_some() {
+                                    break;
+                                }
+                            }
+                            
+                            if let (Some(provider_id), Some(model_id)) = (selected_provider_id, selected_model_id) {
+                                // Switch to this provider and model
+                                app.config.set_selected_provider(provider_id);
+                                app.config.default_model = model_id;
+                                
+                                // Save the config
+                                if let Err(e) = app.config.save() {
+                                    eprintln!("Failed to save config: {}", e);
+                                }
+                                
+                                // Return to conversation
+                                app.view = AppView::Conversation;
+                                return Ok(());
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.view = AppView::Conversation;
+                        }
+                        _ => {}
                     },
                     _ => {
                         // Handle other views

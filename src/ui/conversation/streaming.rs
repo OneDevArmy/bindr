@@ -116,12 +116,22 @@ impl Widget for StreamingResponse {
 
         let mut y_offset = 0;
         
-        // Render streaming indicator
+        // Render streaming indicator with animated dots
         if self.is_streaming {
+            let dots = match (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() / 300) % 4 {
+                0 => ".",
+                1 => "..",
+                2 => "...",
+                _ => "   ",
+            };
+            
             let indicator = Line::from(vec![
                 Span::styled("🤖 ", Style::default().fg(Color::Green)),
                 Span::styled("Bindr is thinking", Style::default().fg(Color::Green)),
-                Span::styled("...", Style::default().fg(Color::Yellow)),
+                Span::styled(dots, Style::default().fg(Color::Yellow)),
             ]);
             buf.set_line(area.x, area.y + y_offset, &indicator, area.width);
             y_offset += 1;
@@ -142,11 +152,20 @@ impl Widget for StreamingResponse {
             }
         }
 
-        // Render cursor if streaming
+        // Render blinking cursor if streaming
         if self.is_streaming && y_offset < area.height {
+            let cursor_char = if (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() / 500) % 2 == 0 {
+                "▋"
+            } else {
+                " "
+            };
+            
             let cursor_line = Line::from(vec![
                 Span::raw("  "),
-                Span::styled("▋", Style::default().fg(Color::Green)),
+                Span::styled(cursor_char, Style::default().fg(Color::Green)),
             ]);
             buf.set_line(area.x, area.y + y_offset as u16, &cursor_line, area.width);
         }

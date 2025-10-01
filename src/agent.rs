@@ -48,7 +48,8 @@ impl AgentOrchestrator {
             });
         }
 
-        let request = LlmRequest::new(messages, self.current_mode);
+        let request = LlmRequest::new(messages, self.current_mode)
+            .with_max_tokens(16000);
         self.llm_client.stream_response(request).await
     }
 
@@ -56,7 +57,7 @@ impl AgentOrchestrator {
     pub async fn continue_conversation(
         &mut self,
         user_message: String,
-    ) -> Result<mpsc::Receiver<LlmEvent>> {
+    ) -> Result<mpsc::UnboundedReceiver<String>> {
         // Add user message to history
         self.add_to_history(ConversationRole::User, user_message.clone());
 
@@ -80,8 +81,37 @@ impl AgentOrchestrator {
             content: user_message,
         });
 
-        let request = LlmRequest::new(messages, self.current_mode);
-        self.llm_client.stream_response(request).await
+        let request = LlmRequest::new(messages, self.current_mode)
+            .with_max_tokens(4000);
+        let mut llm_rx = self.llm_client.stream_response(request).await?;
+        
+        // Convert LLM events to simple string chunks
+        let (tx, rx) = mpsc::unbounded_channel();
+        
+        tokio::spawn(async move {
+            while let Some(event) = llm_rx.recv().await {
+                match event {
+                    LlmEvent::TextDelta(chunk) => {
+                        let _ = tx.send(chunk);
+                    }
+                    LlmEvent::ResponseComplete(content) => {
+                        let _ = tx.send(content);
+                    }
+                    LlmEvent::ReasoningDelta(_reasoning) => {
+                        // Optionally forward reasoning content; currently ignored to avoid UX clutter
+                    }
+                    LlmEvent::StreamComplete => {
+                        break;
+                    }
+                    LlmEvent::Error(error) => {
+                        let _ = tx.send(format!("Error: {}", error));
+                        break;
+                    }
+                }
+            }
+        });
+        
+        Ok(rx)
     }
 
     /// Switch to a different mode
@@ -128,7 +158,7 @@ impl AgentOrchestrator {
     fn get_system_prompt(&self) -> String {
         let base_prompt = match self.current_mode {
             BindrMode::Brainstorm => {
-                "You are a creative brainstorming assistant for Bindr. Help users explore ideas, think outside the box, and generate innovative concepts. Be enthusiastic, creative, and encouraging. Ask probing questions to help users refine their ideas. When the user seems ready to move forward with a concept, suggest creating a project and moving to planning mode."
+                "You are a creative brainstorming assistant for Bindr. Help users explore ideas, think outside the box, and generate innovative concepts. Be concise, creative, and encouraging. Ask probing questions to help users refine their ideas. When the user seems ready to move forward with a concept, suggest creating a project and moving to planning mode."
             }
             BindrMode::Plan => {
                 "You are a detailed project planning assistant for Bindr. Create comprehensive, structured plans with clear steps, architecture decisions, and implementation roadmaps. Be thorough, organized, and practical. Focus on actionable items and realistic timelines. Generate a detailed plan that can be used for implementation. When the plan is complete, suggest moving to execution mode."

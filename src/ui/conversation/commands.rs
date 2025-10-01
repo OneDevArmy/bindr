@@ -8,6 +8,8 @@ use strum::{IntoEnumIterator, AsRefStr, EnumIter, EnumString, IntoStaticStr};
 pub enum SlashCommand {
     /// Switch to a different mode (brainstorm, plan, execute, document)
     Mode,
+    /// Switch to a different model
+    Model,
     /// Return to home screen
     Home,
     /// Exit the application
@@ -21,6 +23,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::Mode => "switch to a different mode (brainstorm, plan, execute, document)",
+            SlashCommand::Model => "switch to a different model",
             SlashCommand::Home => "return to the home screen",
             SlashCommand::Bye => "exit the application",
             SlashCommand::Help => "show available commands",
@@ -35,7 +38,7 @@ impl SlashCommand {
     /// Whether this command can be run while streaming is active.
     pub fn available_during_streaming(self) -> bool {
         match self {
-            SlashCommand::Mode | SlashCommand::Home | SlashCommand::Bye | SlashCommand::Help => true,
+            SlashCommand::Mode | SlashCommand::Model | SlashCommand::Home | SlashCommand::Bye | SlashCommand::Help => true,
         }
     }
 }
@@ -65,6 +68,7 @@ pub fn parse_slash_command(input: &str) -> Option<SlashCommand> {
         "q" | "quit" | "exit" => Some(SlashCommand::Bye),
         "h" | "home" => Some(SlashCommand::Home),
         "m" | "switch" => Some(SlashCommand::Mode),
+        "models" => Some(SlashCommand::Model),
         _ => None,
     }
 }
@@ -77,7 +81,7 @@ pub fn get_help_text() -> String {
         help.push_str(&format!("/{} - {}\n", command_str, command.description()));
     }
     
-    help.push_str("\nYou can also use aliases like /q for /bye, /h for /home, /m for /mode");
+    help.push_str("\nYou can also use aliases like /q for /bye, /h for /home, /m for /mode, /models for /model");
     
     help
 }

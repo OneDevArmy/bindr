@@ -1,13 +1,14 @@
 use crate::agent::AgentManager;
-use crate::events::{BindrMode, LlmStreamEvent};
+use crate::events::BindrMode;
 use crate::llm::LlmClient;
 use crate::ui::conversation::{ConversationComposer, ConversationHistory, StreamingResponse, SlashCommand, get_help_text};
 use anyhow::Result;
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect, Direction},
     widgets::Widget,
 };
+use tokio::sync::mpsc;
 
 /// Actions that can be requested by the conversation manager
 #[derive(Debug, Clone)]
@@ -15,10 +16,10 @@ pub enum ConversationAction {
     None,
     GoHome,
     Exit,
+    ShowModelSelection,
 }
 
 /// Manages the conversation flow and UI components
-#[derive(Clone)]
 pub struct ConversationManager {
     history: ConversationHistory,
     composer: ConversationComposer,
@@ -28,6 +29,8 @@ pub struct ConversationManager {
     llm_client: LlmClient,
     current_mode: BindrMode,
     is_active: bool,
+    stream_receiver: Option<mpsc::UnboundedReceiver<String>>,
+    current_streaming_message: String,
 }
 
 impl ConversationManager {
@@ -42,6 +45,8 @@ impl ConversationManager {
             llm_client,
             current_mode: mode,
             is_active: false,
+            stream_receiver: None,
+            current_streaming_message: String::new(),
         }
     }
 
@@ -55,7 +60,7 @@ impl ConversationManager {
         );
     }
 
-    /// Handle user input
+    /// Handle user input and start streaming response
     pub async fn handle_input(&mut self, input: String) -> Result<()> {
         if input.trim().is_empty() {
             return Ok(());
@@ -66,36 +71,55 @@ impl ConversationManager {
 
         // Start streaming response
         self.streaming.start_streaming();
+        self.current_streaming_message.clear();
 
-        // Get streaming response from agent
-        let mut stream_rx = self.agent_manager
+        // Get streaming response from agent and store the receiver
+        let stream_rx = self.agent_manager
             .orchestrator_mut()
             .continue_conversation(input)
             .await?;
 
-        // Process streaming events
-        while let Some(event) = stream_rx.recv().await {
-            let stream_event = match event {
-                crate::llm::LlmEvent::TextDelta(delta) => LlmStreamEvent::TextDelta(delta),
-                crate::llm::LlmEvent::ResponseComplete(content) => LlmStreamEvent::ResponseComplete(content),
-                crate::llm::LlmEvent::ReasoningDelta(delta) => LlmStreamEvent::ReasoningDelta(delta),
-                crate::llm::LlmEvent::StreamComplete => LlmStreamEvent::StreamComplete,
-                crate::llm::LlmEvent::Error(error) => LlmStreamEvent::Error(error),
-            };
-            let continue_streaming = self.streaming.process_event(stream_event);
-            if !continue_streaming {
-                break;
-            }
-        }
-
-        // Add completed response to history
-        let response = self.streaming.get_response();
-        if !response.is_empty() {
-            self.history.add_assistant_message(response.clone(), self.current_mode);
-            self.agent_manager.orchestrator_mut().process_complete_response(response);
-        }
+        // Store the stream receiver for processing in the main loop
+        self.stream_receiver = Some(stream_rx);
 
         Ok(())
+    }
+
+    /// Process streaming chunks (called from main loop)
+    pub fn process_streaming_chunks(&mut self) {
+        if let Some(ref mut stream_rx) = self.stream_receiver {
+            loop {
+                match stream_rx.try_recv() {
+                    Ok(chunk) => {
+                        self.current_streaming_message.push_str(&chunk);
+                        // Update the streaming message in history as it grows
+                        self.history.set_streaming_message(self.current_streaming_message.clone());
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        // No more chunks right now
+                        break;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        // Drain any remaining buffered chunks before finalizing
+                        while let Ok(chunk) = stream_rx.try_recv() {
+                            self.current_streaming_message.push_str(&chunk);
+                        }
+                        // Stream complete - finalize message
+                        if !self.current_streaming_message.is_empty() {
+                            self.history.add_assistant_message(
+                                self.current_streaming_message.clone(),
+                                self.current_mode,
+                            );
+                        }
+                        self.history.clear_streaming_message();
+                        self.current_streaming_message.clear();
+                        self.stream_receiver = None;
+                        self.streaming.clear();
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Switch to a different mode
@@ -183,11 +207,14 @@ impl ConversationManager {
             SlashCommand::Bye => {
                 Ok(ConversationAction::Exit)
             }
-            SlashCommand::Help => {
-                let help_text = get_help_text();
-                self.history.add_system_message(help_text, self.current_mode);
-                Ok(ConversationAction::None)
-            }
+                    SlashCommand::Help => {
+                        let help_text = get_help_text();
+                        self.history.add_system_message(help_text, self.current_mode);
+                        Ok(ConversationAction::None)
+                    }
+                    SlashCommand::Model => {
+                        Ok(ConversationAction::ShowModelSelection)
+                    }
         }
     }
 
@@ -235,4 +262,25 @@ impl Widget for ConversationManager {
             self.streaming.render(streaming_area, buf);
         }
     }
+}
+
+impl ConversationManager {
+    /// Render the conversation UI components
+    pub fn render_conversation_ui(&mut self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
+        // Create layout for conversation UI
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(10), // History area
+                Constraint::Length(3), // Composer area
+            ])
+            .split(area);
+
+        // Render history (includes streaming message if active)
+        self.history.clone().render(chunks[0], buf);
+
+        // Render composer
+        self.composer.clone().render(chunks[1], buf);
+    }
+
 }

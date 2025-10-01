@@ -106,7 +106,7 @@ impl LlmClient {
         request: LlmRequest,
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
-        match provider.name.as_str() {
+        match provider.name.to_lowercase().as_str() {
             "openai" => Self::stream_openai(client, provider, model, api_key, request, tx).await,
             "anthropic" => Self::stream_anthropic(client, provider, model, api_key, request, tx).await,
             "google" => Self::stream_google(client, provider, model, api_key, request, tx).await,
@@ -213,7 +213,7 @@ impl LlmClient {
         request: LlmRequest,
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
-        let url = format!("{}/v1beta/models/{}:streamGenerateContent?key={}", 
+        let url = format!("{}/models/{}:streamGenerateContent?key={}", 
                          provider.base_url, model, api_key);
         
         // Convert messages to Gemini format
@@ -374,6 +374,7 @@ impl LlmClient {
     ) -> Result<()> {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut assistant_text = String::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -388,15 +389,28 @@ impl LlmClient {
                 if line.starts_with("data: ") {
                     let data = &line[6..];
                     if data == "[DONE]" {
+                        // Emit final accumulated message if we have content
+                        if !assistant_text.is_empty() {
+                            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+                        }
                         let _ = tx.send(LlmEvent::StreamComplete).await;
                         return Ok(());
                     }
 
                     if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(choices) = chunk.get("choices").and_then(|c| c.get(0)) {
+                            // Handle streaming deltas
                             if let Some(delta) = choices.get("delta") {
                                 if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                    assistant_text.push_str(content);
                                     let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
+                                }
+                            }
+                            
+                            // Handle finish_reason
+                            if let Some(finish_reason) = choices.get("finish_reason").and_then(|v| v.as_str()) {
+                                if finish_reason == "stop" && !assistant_text.is_empty() {
+                                    let _ = tx.send(LlmEvent::ResponseComplete(assistant_text.clone())).await;
                                 }
                             }
                         }
@@ -405,6 +419,29 @@ impl LlmClient {
             }
         }
 
+        // Flush any remaining buffer line (without newline)
+        let line = buffer.trim();
+        if line.starts_with("data: ") {
+            let data = &line[6..];
+            if data != "[DONE]" {
+                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(choices) = chunk.get("choices").and_then(|c| c.get(0)) {
+                        if let Some(delta) = choices.get("delta") {
+                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                assistant_text.push_str(content);
+                                let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit final accumulated message if we have content
+        if !assistant_text.is_empty() {
+            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+        }
+        let _ = tx.send(LlmEvent::StreamComplete).await;
         Ok(())
     }
 
@@ -415,6 +452,7 @@ impl LlmClient {
     ) -> Result<()> {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut assistant_text = String::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -429,6 +467,10 @@ impl LlmClient {
                 if line.starts_with("data: ") {
                     let data = &line[6..];
                     if data == "[DONE]" {
+                        // Emit final accumulated message if we have content
+                        if !assistant_text.is_empty() {
+                            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+                        }
                         let _ = tx.send(LlmEvent::StreamComplete).await;
                         return Ok(());
                     }
@@ -436,7 +478,15 @@ impl LlmClient {
                     if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(content_block) = chunk.get("content_block") {
                             if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
+                                assistant_text.push_str(text);
                                 let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
+                            }
+                        }
+                        
+                        // Handle stop event
+                        if let Some(stop_reason) = chunk.get("stop_reason").and_then(|v| v.as_str()) {
+                            if stop_reason == "end_turn" && !assistant_text.is_empty() {
+                                let _ = tx.send(LlmEvent::ResponseComplete(assistant_text.clone())).await;
                             }
                         }
                     }
@@ -444,6 +494,27 @@ impl LlmClient {
             }
         }
 
+        // Flush any remaining buffer line (without newline)
+        let line = buffer.trim();
+        if line.starts_with("data: ") {
+            let data = &line[6..];
+            if data != "[DONE]" {
+                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content_block) = chunk.get("content_block") {
+                        if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
+                            assistant_text.push_str(text);
+                            let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit final accumulated message if we have content
+        if !assistant_text.is_empty() {
+            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+        }
+        let _ = tx.send(LlmEvent::StreamComplete).await;
         Ok(())
     }
 
@@ -459,28 +530,18 @@ impl LlmClient {
             let chunk = chunk?;
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
+        }
 
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
-                    if data == "[DONE]" {
-                        let _ = tx.send(LlmEvent::StreamComplete).await;
-                        return Ok(());
-                    }
-
-                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(candidates) = chunk.get("candidates").and_then(|c| c.get(0)) {
-                            if let Some(content) = candidates.get("content") {
-                                if let Some(parts) = content.get("parts") {
-                                    if let Some(part) = parts.get(0) {
-                                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                            let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
-                                        }
-                                    }
+        // Google returns the complete response at once, not as SSE
+        if let Ok(response_array) = serde_json::from_str::<Vec<serde_json::Value>>(&buffer) {
+            if let Some(response_json) = response_array.get(0) {
+                if let Some(candidates) = response_json.get("candidates").and_then(|c| c.get(0)) {
+                    if let Some(content) = candidates.get("content") {
+                        if let Some(parts) = content.get("parts") {
+                            if let Some(part) = parts.get(0) {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    // Simulate streaming by sending text in chunks
+                                    Self::simulate_streaming(text, tx.clone()).await;
                                 }
                             }
                         }
@@ -488,8 +549,36 @@ impl LlmClient {
                 }
             }
         }
-
+        let _ = tx.send(LlmEvent::StreamComplete).await;
         Ok(())
+    }
+
+    /// Simulate streaming by breaking text into chunks with delays
+    async fn simulate_streaming(text: &str, tx: mpsc::Sender<LlmEvent>) {
+        // For short responses, stream character by character
+        // For longer responses, stream word by word
+        if text.len() < 50 {
+            for ch in text.chars() {
+                let _ = tx.send(LlmEvent::TextDelta(ch.to_string())).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+            }
+        } else {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            
+            for (i, word) in words.iter().enumerate() {
+                let chunk = if i == 0 {
+                    word.to_string()
+                } else {
+                    format!(" {}", word)
+                };
+                
+                // Send the chunk
+                let _ = tx.send(LlmEvent::TextDelta(chunk)).await;
+                
+                // Add a small delay to simulate typing
+                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+            }
+        }
     }
 }
 
