@@ -154,6 +154,12 @@ impl AgentOrchestrator {
         });
     }
 
+    /// Update orchestrator configuration and refresh LLM client
+    pub fn update_config(&mut self, config: Config) {
+        self.llm_client = LlmClient::new(config.clone());
+        self.config = config;
+    }
+
     /// Get system prompt for current mode
     fn get_system_prompt(&self) -> String {
         let base_prompt = match self.current_mode {
@@ -390,5 +396,10 @@ impl AgentManager {
     #[allow(dead_code)]
     pub fn orchestrator(&self) -> &AgentOrchestrator {
         &self.orchestrator
+    }
+
+    /// Refresh agent configuration
+    pub fn update_config(&mut self, config: Config) {
+        self.orchestrator.update_config(config);
     }
 }

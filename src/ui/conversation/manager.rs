@@ -1,4 +1,5 @@
 use crate::agent::AgentManager;
+use crate::config::Config;
 use crate::events::BindrMode;
 use crate::llm::LlmClient;
 use crate::ui::conversation::{ConversationComposer, ConversationHistory, StreamingResponse, SlashCommand, get_help_text};
@@ -185,6 +186,12 @@ impl ConversationManager {
         self.history.clear();
         self.composer.clear();
         self.streaming.clear();
+    }
+
+    /// Refresh configuration for agent and client
+    pub fn update_config(&mut self, config: Config) {
+        self.agent_manager.update_config(config.clone());
+        self.llm_client = LlmClient::new(config);
     }
 
     /// Handle slash commands

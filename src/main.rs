@@ -152,6 +152,14 @@ impl App {
         self.conversation_manager = Some(conversation_manager);
         self.view = AppView::Conversation;
     }
+
+    fn sync_runtime_config(&mut self) {
+        let config_clone = self.config.clone();
+        self.agent_manager.update_config(config_clone.clone());
+        if let Some(ref mut conversation_manager) = self.conversation_manager {
+            conversation_manager.update_config(config_clone);
+        }
+    }
 }
 
 
@@ -850,18 +858,24 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                             if !app.key_input.is_empty() {
                                 let provider_id = app.config.selected_provider.clone();
                                 app.config.set_api_key(provider_id, app.key_input.clone());
-                                
-                                // Save the config with the new API key
                                 if let Err(e) = app.config.save() {
                                     eprintln!("Failed to save config: {}", e);
                                 }
-                                
-                                app.view = AppView::SelectModel;
+
+                                app.sync_runtime_config();
+
                                 app.key_input.clear();
+                                app.view = AppView::SelectModel;
+                                if let Some(ref mut cm) = app.conversation_manager {
+                                    cm.set_focus(false);
+                                }
                             }
                         }
                         KeyCode::Char('m') | KeyCode::Char('M') => {
                             app.view = AppView::SelectModel;
+                            if let Some(ref mut cm) = app.conversation_manager {
+                                cm.set_focus(false);
+                            }
                         }
                         KeyCode::Char(c) => {
                             app.key_input.push(c);
@@ -885,19 +899,21 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                         }
                         KeyCode::Enter => {
                             let providers = app.config.get_providers();
-                            if let Some((provider_id, _)) = providers.get(app.provider_selection) {
+                            if let Some((provider_id, provider)) = providers.get(app.provider_selection) {
                                 let provider_id_str = provider_id.to_string();
-                                
+
                                 // Check if API key already exists for this provider
-                                let has_api_key = app.config.api_keys.contains_key(*provider_id) || 
-                                   app.config.get_current_provider()
-                                       .and_then(|p| p.api_key_env.as_ref())
-                                       .map(|env| std::env::var(env).is_ok())
-                                       .unwrap_or(false);
-                                
+                                let has_api_key = app.config.api_keys.contains_key(*provider_id)
+                                    || provider
+                                        .api_key_env
+                                        .as_ref()
+                                        .map(|env| std::env::var(env).is_ok())
+                                        .unwrap_or(false);
+
                                 // Now we can safely mutate config
                                 app.config.set_selected_provider(provider_id_str);
-                                
+                                app.sync_runtime_config();
+
                                 if has_api_key {
                                     // API key exists, go directly to model selection
                                     app.view = AppView::SelectModel;
@@ -932,12 +948,14 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                                         app.view = AppView::CustomModelInput;
                                     } else {
                                         app.config.default_model = model.id.clone();
-                                        
+
                                         // Save the config with the new model
                                         if let Err(e) = app.config.save() {
                                             eprintln!("Failed to save config: {}", e);
                                         }
-                                        
+
+                                        app.sync_runtime_config();
+
                                         app.view = AppView::Home;
                                     }
                                 }
@@ -956,12 +974,14 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                         KeyCode::Enter => {
                             if !app.custom_model_input.is_empty() {
                                 app.config.set_custom_model(app.custom_model_input.clone());
-                                
+
                                 // Save the config with the custom model
                                 if let Err(e) = app.config.save() {
                                     eprintln!("Failed to save config: {}", e);
                                 }
-                                
+
+                                app.sync_runtime_config();
+
                                 app.view = AppView::Home;
                                 app.custom_model_input.clear();
                             }
@@ -976,24 +996,24 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                     },
                     AppView::Conversation => {
                         if let Some(ref mut conversation_manager) = app.conversation_manager {
-                            // Handle input in conversation (including slash commands)
                             match conversation_manager.handle_key(key).await {
-                                Ok(action) => {
-                                    match action {
-                                        crate::ui::conversation::manager::ConversationAction::GoHome => {
-                                            app.view = AppView::Home;
-                                            app.conversation_manager = None;
-                                        }
-                                        crate::ui::conversation::manager::ConversationAction::Exit => {
-                                            return Ok(());
-                                        }
-                                        crate::ui::conversation::manager::ConversationAction::ShowModelSelection => {
-                                            app.view = AppView::ModelSelection;
-                                            app.model_switch_selection = 0;
-                                        }
-                                        crate::ui::conversation::manager::ConversationAction::None => {}
+                                Ok(action) => match action {
+                                    crate::ui::conversation::manager::ConversationAction::GoHome => {
+                                        app.view = AppView::Home;
+                                        app.conversation_manager = None;
                                     }
-                                }
+                                    crate::ui::conversation::manager::ConversationAction::Exit => {
+                                        return Ok(());
+                                    }
+                                    crate::ui::conversation::manager::ConversationAction::ShowModelSelection => {
+                                        if let Some(ref mut cm) = app.conversation_manager {
+                                            cm.set_focus(false);
+                                        }
+                                        app.view = AppView::ModelSelection;
+                                        app.model_switch_selection = 0;
+                                    }
+                                    crate::ui::conversation::manager::ConversationAction::None => {}
+                                },
                                 Err(e) => {
                                     eprintln!("Error handling input: {}", e);
                                 }
@@ -1008,7 +1028,8 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                         }
                         KeyCode::Down => {
                             let providers = app.config.get_providers();
-                            let total_models: usize = providers.iter()
+                            let total_models: usize = providers
+                                .iter()
                                 .map(|(_, provider)| provider.models.len())
                                 .sum();
                             if app.model_switch_selection < total_models.saturating_sub(1) {
@@ -1021,7 +1042,7 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                             let mut current_index = 0;
                             let mut selected_provider_id = None;
                             let mut selected_model_id = None;
-                            
+
                             for (provider_id, provider) in providers.iter() {
                                 for model in &provider.models {
                                     if current_index == app.model_switch_selection {
@@ -1035,24 +1056,31 @@ async fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: 
                                     break;
                                 }
                             }
-                            
+
                             if let (Some(provider_id), Some(model_id)) = (selected_provider_id, selected_model_id) {
                                 // Switch to this provider and model
                                 app.config.set_selected_provider(provider_id);
                                 app.config.default_model = model_id;
-                                
+
                                 // Save the config
                                 if let Err(e) = app.config.save() {
                                     eprintln!("Failed to save config: {}", e);
                                 }
-                                
+
+                                app.sync_runtime_config();
+
                                 // Return to conversation
                                 app.view = AppView::Conversation;
-                                return Ok(());
+                                if let Some(ref mut cm) = app.conversation_manager {
+                                    cm.set_focus(true);
+                                }
                             }
                         }
                         KeyCode::Esc => {
                             app.view = AppView::Conversation;
+                            if let Some(ref mut cm) = app.conversation_manager {
+                                cm.set_focus(true);
+                            }
                         }
                         _ => {}
                     },
