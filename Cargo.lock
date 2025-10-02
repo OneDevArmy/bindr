@@ -125,6 +125,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "once_cell",
  "ratatui",
  "reqwest",
  "serde",

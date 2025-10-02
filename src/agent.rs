@@ -1,7 +1,9 @@
 use crate::config::Config;
 use crate::events::{BindrMode, ConversationRole, ConversationEntry, ProjectState};
 use crate::llm::{LlmClient, LlmRequest, LlmMessage, LlmEvent};
+use crate::prompts;
 use crate::session::SessionManager;
+use crate::tools::{ToolDispatcher, ToolInvocation, ToolRequestOutcome};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -15,18 +17,25 @@ pub struct AgentOrchestrator {
     session_manager: SessionManager,
     current_mode: BindrMode,
     conversation_history: Vec<ConversationEntry>,
+    current_provider: String,
+    current_model: String,
 }
 
 impl AgentOrchestrator {
     pub fn new(config: Config, session_manager: SessionManager) -> Self {
         let llm_client = LlmClient::new(config.clone());
         
+        let current_provider = config.selected_provider.clone();
+        let current_model = config.default_model.clone();
+
         Self {
             config,
             llm_client,
             session_manager,
             current_mode: BindrMode::Brainstorm,
             conversation_history: Vec::new(),
+            current_provider,
+            current_model,
         }
     }
 
@@ -81,8 +90,22 @@ impl AgentOrchestrator {
             content: user_message,
         });
 
+        let provider_id = if self.current_provider.is_empty() {
+            self.config.selected_provider.clone()
+        } else {
+            self.current_provider.clone()
+        };
+        let model_id = if self.current_model.is_empty() {
+            self.config.default_model.clone()
+        } else {
+            self.current_model.clone()
+        };
+
         let request = LlmRequest::new(messages, self.current_mode)
-            .with_max_tokens(4000);
+            .with_temperature(0.4)
+            .with_max_tokens(2000)
+            .with_provider(provider_id.clone())
+            .with_model(model_id.clone());
         let mut llm_rx = self.llm_client.stream_response(request).await?;
         
         // Convert LLM events to simple string chunks
@@ -94,8 +117,8 @@ impl AgentOrchestrator {
                     LlmEvent::TextDelta(chunk) => {
                         let _ = tx.send(chunk);
                     }
-                    LlmEvent::ResponseComplete(content) => {
-                        let _ = tx.send(content);
+                    LlmEvent::ResponseComplete(_content) => {
+                        // We've already forwarded incremental chunks; no need to resend the full text
                     }
                     LlmEvent::ReasoningDelta(_reasoning) => {
                         // Optionally forward reasoning content; currently ignored to avoid UX clutter
@@ -110,6 +133,10 @@ impl AgentOrchestrator {
                 }
             }
         });
+        
+        // Store last selections for subsequent requests
+        self.current_provider = provider_id;
+        self.current_model = model_id;
         
         Ok(rx)
     }
@@ -157,33 +184,19 @@ impl AgentOrchestrator {
     /// Update orchestrator configuration and refresh LLM client
     pub fn update_config(&mut self, config: Config) {
         self.llm_client = LlmClient::new(config.clone());
+        self.current_provider = config.selected_provider.clone();
+        self.current_model = config.default_model.clone();
         self.config = config;
+    }
+
+    /// Review a tool invocation against the current mode's capabilities
+    pub fn review_tool_invocation(&self, invocation: ToolInvocation) -> Result<ToolRequestOutcome> {
+        ToolDispatcher::review(self.current_mode, invocation)
     }
 
     /// Get system prompt for current mode
     fn get_system_prompt(&self) -> String {
-        let base_prompt = match self.current_mode {
-            BindrMode::Brainstorm => {
-                "You are a creative brainstorming assistant for Bindr. Help users explore ideas, think outside the box, and generate innovative concepts. Be concise, creative, and encouraging. Ask probing questions to help users refine their ideas. When the user seems ready to move forward with a concept, suggest creating a project and moving to planning mode."
-            }
-            BindrMode::Plan => {
-                "You are a detailed project planning assistant for Bindr. Create comprehensive, structured plans with clear steps, architecture decisions, and implementation roadmaps. Be thorough, organized, and practical. Focus on actionable items and realistic timelines. Generate a detailed plan that can be used for implementation. When the plan is complete, suggest moving to execution mode."
-            }
-            BindrMode::Execute => {
-                "You are a code implementation assistant for Bindr. Generate clean, well-documented code based on project plans. Follow best practices, include error handling, and write tests when appropriate. Be precise and efficient in your implementations. Focus on creating working, production-ready code. When implementation is complete, suggest moving to documentation mode."
-            }
-            BindrMode::Document => {
-                "You are a documentation specialist for Bindr. Create clear, comprehensive documentation that explains what was built, how it works, and how to use it. Be thorough but concise, and focus on practical information for developers and users. Generate documentation that makes the project accessible and maintainable."
-            }
-        };
-
-        // Add context from previous modes if available
-        let context = self.get_mode_context();
-        if !context.is_empty() {
-            format!("{}\n\nContext from previous work:\n{}", base_prompt, context)
-        } else {
-            base_prompt.to_string()
-        }
+        self.build_system_prompt(self.current_mode)
     }
 
     /// Get context from previous modes
@@ -321,20 +334,19 @@ impl AgentOrchestrator {
 
     /// Get system prompt for a specific mode
     fn get_system_prompt_for_mode(&self, mode: BindrMode) -> String {
-        match mode {
-            BindrMode::Brainstorm => {
-                "You are a creative brainstorming assistant. Help users explore ideas, think outside the box, and generate innovative concepts. Be enthusiastic, creative, and encouraging. Ask probing questions to help users refine their ideas.".to_string()
-            }
-            BindrMode::Plan => {
-                "You are a detailed project planning assistant. Create comprehensive, structured plans with clear steps, architecture decisions, and implementation roadmaps. Be thorough, organized, and practical. Focus on actionable items and realistic timelines.".to_string()
-            }
-            BindrMode::Execute => {
-                "You are a code implementation assistant. Generate clean, well-documented code based on project plans. Follow best practices, include error handling, and write tests when appropriate. Be precise and efficient in your implementations.".to_string()
-            }
-            BindrMode::Document => {
-                "You are a documentation specialist. Create clear, comprehensive documentation that explains what was built, how it works, and how to use it. Be thorough but concise, and focus on practical information for developers and users.".to_string()
-            }
+        self.build_system_prompt(mode)
+    }
+
+    fn build_system_prompt(&self, mode: BindrMode) -> String {
+        let mut prompt = prompts::mode_prompt(mode).to_string();
+
+        let context = self.get_mode_context();
+        if !context.is_empty() {
+            prompt.push_str("\n\nContext from previous work:\n");
+            prompt.push_str(&context);
         }
+
+        prompt
     }
 
     /// Get transition suggestion message
@@ -401,5 +413,10 @@ impl AgentManager {
     /// Refresh agent configuration
     pub fn update_config(&mut self, config: Config) {
         self.orchestrator.update_config(config);
+    }
+
+    /// Validate a tool invocation for the active mode
+    pub fn review_tool_invocation(&self, invocation: ToolInvocation) -> Result<ToolRequestOutcome> {
+        self.orchestrator.review_tool_invocation(invocation)
     }
 }

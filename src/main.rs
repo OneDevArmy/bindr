@@ -23,6 +23,8 @@ mod llm;
 mod streaming;
 mod agent;
 mod ui;
+mod prompts;
+pub mod tools;
 
 
 use events::{AppEvent, BindrMode};
@@ -30,6 +32,7 @@ use config::Config;
 use session::SessionManager;
 use agent::AgentManager;
 use ui::conversation::ConversationManager;
+use tools::ToolRequestOutcome;
 
 // Dark mode color palette
 const BG_PRIMARY: Color = Color::Rgb(16, 18, 24);      // Deep blue-black
@@ -49,6 +52,26 @@ const BORDER_COLOR: Color = Color::Rgb(48, 52, 70);    // Subtle border
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+struct AppState {
+    should_quit: bool,
+    show_model_selection: bool,
+    current_mode: BindrMode,
+    status_message: Option<String>,
+    pending_tool: Option<ToolRequestOutcome>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            should_quit: false,
+            show_model_selection: false,
+            current_mode: BindrMode::Brainstorm,
+            status_message: None,
+            pending_tool: None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -80,52 +103,47 @@ struct App {
     custom_model_input: String,
     config: Config,
     #[allow(dead_code)]
-    session_manager: SessionManager,
     agent_manager: AgentManager,
     conversation_manager: Option<ConversationManager>,
     #[allow(dead_code)]
     app_event_tx: mpsc::UnboundedSender<AppEvent>,
     #[allow(dead_code)]
     app_event_rx: mpsc::UnboundedReceiver<AppEvent>,
-    // Selection state
+    conversation_lines: Vec<ratatui::text::Line<'static>>,
+    is_streaming: bool,
+    current_input: String,
+    state: AppState,
     provider_selection: usize,
     model_selection: usize,
     model_switch_selection: usize,
-    // Conversation state
-    #[allow(dead_code)]
-    conversation_lines: Vec<ratatui::text::Line<'static>>,
-    #[allow(dead_code)]
-    is_streaming: bool,
-    #[allow(dead_code)]
-    current_input: String,
 }
 
 impl App {
-    fn new(config: Config, session_manager: SessionManager) -> (Self, mpsc::UnboundedSender<AppEvent>) {
+    fn new(config: Config, mut session_manager: SessionManager) -> (Self, mpsc::UnboundedSender<AppEvent>) {
         let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
         let agent_manager = AgentManager::new(config.clone(), session_manager.clone());
-        
+
         let app = App {
             view: AppView::Home,
             key_input: String::new(),
             custom_model_input: String::new(),
             config,
-            session_manager,
             agent_manager,
             conversation_manager: None,
             app_event_tx: app_event_tx.clone(),
             app_event_rx,
-            provider_selection: 0,
-            model_selection: 0,
-            model_switch_selection: 0,
             conversation_lines: Vec::new(),
             is_streaming: false,
             current_input: String::new(),
+            state: AppState::default(),
+            provider_selection: 0,
+            model_selection: 0,
+            model_switch_selection: 0,
         };
-        
+
         (app, app_event_tx)
     }
-    
+
     fn get_usage_info(&self) -> (u32, u32) {
         self.config.get_usage_info()
     }

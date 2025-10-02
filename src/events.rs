@@ -59,7 +59,7 @@ pub enum LlmStreamEvent {
 
 
 /// Bindr workflow modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BindrMode {
     /// Brainstorming phase - exploring ideas
     Brainstorm,

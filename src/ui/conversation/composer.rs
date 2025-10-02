@@ -1,20 +1,20 @@
 use crate::events::BindrMode;
-use crate::ui::conversation::commands::SlashCommand;
+use crate::ui::conversation::commands::{command_entries, CommandEntry, ParsedCommand};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 /// Result returned when the user interacts with the conversation composer
 #[derive(Debug, PartialEq)]
 pub enum ConversationResult {
     Submitted(String),
-    Command(SlashCommand),
+    Command(ParsedCommand),
     None,
 }
 
@@ -44,6 +44,10 @@ pub struct ConversationComposer {
     placeholder: String,
     has_focus: bool,
     current_mode: BindrMode,
+    command_entries: Vec<CommandEntry>,
+    filtered_commands: RefCell<Vec<CommandEntry>>,
+    show_command_palette: Cell<bool>,
+    selected_command: Cell<Option<usize>>,
 }
 
 impl ConversationComposer {
@@ -53,6 +57,10 @@ impl ConversationComposer {
             placeholder,
             has_focus: false,
             current_mode,
+            command_entries: command_entries(),
+            filtered_commands: RefCell::new(Vec::new()),
+            show_command_palette: Cell::new(false),
+            selected_command: Cell::new(None),
         }
     }
 
@@ -67,32 +75,93 @@ impl ConversationComposer {
         match key.code {
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Shift+Enter: new line
                     self.insert_char(&mut state, '\n');
-                } else {
-                    // Enter: submit
-                    if !state.content.trim().is_empty() {
-                        let content = state.content.clone();
-                        state.content.clear();
-                        state.cursor_position = 0;
-                        
-                        // Check if it's a slash command
-                        if let Some(command) = crate::ui::conversation::commands::parse_slash_command(&content) {
-                            return ConversationResult::Command(command);
-                        } else {
-                            return ConversationResult::Submitted(content);
-                        }
+                } else if self.show_command_palette.get() {
+                    if self.apply_selected_command(&mut state) {
+                        return ConversationResult::None;
+                    }
+                } else if !state.content.trim().is_empty() {
+                    let content = state.content.clone();
+                    state.content.clear();
+                    state.cursor_position = 0;
+                    self.close_command_palette();
+                    drop(state);
+                    if let Some(command) = crate::ui::conversation::commands::parse_slash_command(&content) {
+                        return ConversationResult::Command(command);
+                    } else {
+                        return ConversationResult::Submitted(content);
+                    }
+                }
+            }
+            KeyCode::Up => {
+                if self.show_command_palette.get() {
+                    self.move_command_selection(-1);
+                    return ConversationResult::None;
+                }
+            }
+            KeyCode::Down => {
+                if self.show_command_palette.get() {
+                    self.move_command_selection(1);
+                    return ConversationResult::None;
+                }
+            }
+            KeyCode::Esc => {
+                if self.show_command_palette.get() {
+                    self.close_command_palette();
+                    return ConversationResult::None;
+                }
+            }
+            KeyCode::Tab => {
+                if self.show_command_palette.get() {
+                    if self.apply_selected_command(&mut state) {
+                        return ConversationResult::None;
                     }
                 }
             }
             KeyCode::Char(c) => {
+                if c == '/' && state.content.is_empty() {
+                    self.insert_char(&mut state, c);
+                    self.open_command_palette(&state);
+                    return ConversationResult::None;
+                }
+
                 self.insert_char(&mut state, c);
+
+                if self.show_command_palette.get() {
+                    if state.content.starts_with('/') {
+                        if c.is_whitespace() {
+                            self.close_command_palette();
+                        } else {
+                            self.refresh_command_palette(&state);
+                        }
+                    } else {
+                        self.close_command_palette();
+                    }
+                } else if state.content == "/" {
+                    self.open_command_palette(&state);
+                }
             }
             KeyCode::Backspace => {
-                self.backspace(&mut state);
+                if self.backspace(&mut state) {
+                    if self.show_command_palette.get() {
+                        if state.content.starts_with('/') {
+                            self.refresh_command_palette(&state);
+                        } else {
+                            self.close_command_palette();
+                        }
+                    }
+                }
             }
             KeyCode::Delete => {
-                self.delete(&mut state);
+                if self.delete(&mut state) {
+                    if self.show_command_palette.get() {
+                        if state.content.starts_with('/') {
+                            self.refresh_command_palette(&state);
+                        } else {
+                            self.close_command_palette();
+                        }
+                    }
+                }
             }
             KeyCode::Left => {
                 if state.cursor_position > 0 {
@@ -123,18 +192,95 @@ impl ConversationComposer {
     }
 
     /// Delete character before cursor
-    fn backspace(&self, state: &mut TextAreaState) {
+    fn backspace(&self, state: &mut TextAreaState) -> bool {
         if state.cursor_position > 0 {
             state.cursor_position -= 1;
             state.content.remove(state.cursor_position);
+            true
+        } else {
+            false
         }
     }
 
     /// Delete character at cursor
-    fn delete(&self, state: &mut TextAreaState) {
+    fn delete(&self, state: &mut TextAreaState) -> bool {
         if state.cursor_position < state.content.len() {
             state.content.remove(state.cursor_position);
+            true
+        } else {
+            false
         }
+    }
+
+    fn open_command_palette(&self, state: &TextAreaState) {
+        self.show_command_palette.set(true);
+        self.refresh_command_palette(state);
+        self.selected_command.set(Some(0));
+    }
+
+    fn close_command_palette(&self) {
+        self.show_command_palette.set(false);
+        self.filtered_commands.borrow_mut().clear();
+        self.selected_command.set(None);
+    }
+
+    fn refresh_command_palette(&self, state: &TextAreaState) {
+        let query = state.content.trim_start_matches('/').to_lowercase();
+        let mut filtered = self.filtered_commands.borrow_mut();
+        filtered.clear();
+
+        for entry in &self.command_entries {
+            if query.is_empty() || entry.keyword.starts_with(&query) {
+                filtered.push(*entry);
+            }
+        }
+
+        if filtered.is_empty() {
+            self.selected_command.set(None);
+        } else {
+            let index = self.selected_command.get().unwrap_or(0);
+            let clamped = index.min(filtered.len() - 1);
+            self.selected_command.set(Some(clamped));
+        }
+    }
+
+    fn move_command_selection(&self, delta: isize) {
+        let filtered = self.filtered_commands.borrow();
+        if filtered.is_empty() {
+            self.selected_command.set(None);
+            return;
+        }
+
+        let current = self.selected_command.get().unwrap_or(0) as isize;
+        let len = filtered.len() as isize;
+        let mut next = current + delta;
+
+        if next < 0 {
+            next = len - 1;
+        } else if next >= len {
+            next = 0;
+        }
+
+        self.selected_command.set(Some(next as usize));
+    }
+
+    fn apply_selected_command(&self, state: &mut TextAreaState) -> bool {
+        let filtered = self.filtered_commands.borrow();
+        let Some(index) = self.selected_command.get() else {
+            return false;
+        };
+
+        if index >= filtered.len() {
+            return false;
+        }
+
+        let entry = filtered[index];
+        state.content = format!("/{} ", entry.keyword);
+        state.cursor_position = state.content.len();
+        drop(filtered);
+        self.close_command_palette();
+        self.refresh_command_palette(state);
+        true
     }
 
     /// Set focus state
@@ -190,14 +336,58 @@ impl Widget for ConversationComposer {
             ]);
             buf.set_line(inner_area.x, inner_area.y, &placeholder_line, inner_area.width);
         } else {
-            // Render content with cursor
-            let lines: Vec<&str> = state.content.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
+            // Render content with cursor indicator
+            let mut content = state.content.clone();
+            if self.has_focus {
+                content.insert(state.cursor_position.min(content.len()), '▌');
+            }
+
+            for (i, line_text) in content.split('\n').enumerate() {
                 if i < inner_area.height as usize {
-                    let line_span = Span::raw(*line);
-                    let line = Line::from(vec![line_span]);
+                    let line = Line::from(vec![Span::raw(line_text)]);
                     buf.set_line(inner_area.x, inner_area.y + i as u16, &line, inner_area.width);
                 }
+            }
+        }
+
+        // Render command palette if active
+        if self.show_command_palette.get() {
+            let filtered = self.filtered_commands.borrow();
+            let palette_height = (filtered.len().min(5) + 2) as u16;
+            let palette_area = Rect {
+                x: inner_area.x,
+                y: inner_area.y.saturating_sub(palette_height).max(0),
+                width: inner_area.width,
+                height: palette_height,
+            };
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title("Commands")
+                .style(Style::default().fg(Color::Blue));
+            let inner = block.inner(palette_area);
+            block.render(palette_area, buf);
+
+            let selected = self.selected_command.get();
+            for (index, entry) in filtered.iter().enumerate() {
+                if index >= inner.height as usize {
+                    break;
+                }
+
+                let is_selected = selected == Some(index);
+                let style = if is_selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                let line = Line::from(vec![
+                    Span::styled(format!("/{}", entry.keyword), style),
+                    Span::styled(" — ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(entry.description, Style::default().fg(Color::Gray)),
+                ]);
+
+                buf.set_line(inner.x, inner.y + index as u16, &line, inner.width);
             }
         }
     }

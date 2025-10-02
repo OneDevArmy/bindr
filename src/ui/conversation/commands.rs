@@ -1,3 +1,7 @@
+use std::str::FromStr;
+
+use crate::events::BindrMode;
+
 use strum::{IntoEnumIterator, AsRefStr, EnumIter, EnumString, IntoStaticStr};
 
 /// Commands that can be invoked by starting a message with a leading slash.
@@ -16,6 +20,50 @@ pub enum SlashCommand {
     Bye,
     /// Show help
     Help,
+}
+
+pub fn command_entries() -> Vec<CommandEntry> {
+    SlashCommand::iter()
+        .map(|command| CommandEntry {
+            command,
+            keyword: command.command(),
+            description: command.description(),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCommand {
+    pub command: SlashCommand,
+    pub argument: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandEntry {
+    pub command: SlashCommand,
+    pub keyword: &'static str,
+    pub description: &'static str,
+}
+
+impl ParsedCommand {
+    pub fn argument(&self) -> Option<&str> {
+        self.argument.as_deref()
+    }
+
+    pub fn mode_target(&self) -> Option<BindrMode> {
+        if self.command != SlashCommand::Mode {
+            return None;
+        }
+
+        let arg = self.argument()?.trim().to_lowercase();
+        match arg.as_str() {
+            "b" | "brainstorm" => Some(BindrMode::Brainstorm),
+            "p" | "plan" => Some(BindrMode::Plan),
+            "e" | "execute" | "build" => Some(BindrMode::Execute),
+            "d" | "doc" | "document" => Some(BindrMode::Document),
+            _ => None,
+        }
+    }
 }
 
 impl SlashCommand {
@@ -51,37 +99,41 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 }
 
 /// Parse a slash command from user input
-pub fn parse_slash_command(input: &str) -> Option<SlashCommand> {
+pub fn parse_slash_command(input: &str) -> Option<ParsedCommand> {
     if !input.starts_with('/') {
         return None;
     }
 
-    let command_str = &input[1..]; // Remove the leading '/'
-    
-    // Try to parse as enum
-    if let Ok(command) = command_str.parse::<SlashCommand>() {
-        return Some(command);
-    }
+    let mut parts = input[1..].split_whitespace();
+    let head = parts.next()?;
+    let rest: Vec<String> = parts.map(|s| s.to_string()).collect();
 
-    // Handle aliases
-    match command_str.to_lowercase().as_str() {
+    let command = SlashCommand::from_str(head).ok().or_else(|| match head.to_lowercase().as_str() {
         "q" | "quit" | "exit" => Some(SlashCommand::Bye),
         "h" | "home" => Some(SlashCommand::Home),
         "m" | "switch" => Some(SlashCommand::Mode),
         "models" => Some(SlashCommand::Model),
         _ => None,
-    }
+    })?;
+
+    let argument = if rest.is_empty() {
+        None
+    } else {
+        Some(rest.join(" "))
+    };
+
+    Some(ParsedCommand { command, argument })
 }
 
 /// Get help text for all available commands
 pub fn get_help_text() -> String {
     let mut help = String::from("Available commands:\n\n");
-    
     for (command_str, command) in built_in_slash_commands() {
         help.push_str(&format!("/{} - {}\n", command_str, command.description()));
     }
     
     help.push_str("\nYou can also use aliases like /q for /bye, /h for /home, /m for /mode, /models for /model");
-    
+    help.push_str("\nUse /mode <b|p|e|d> to jump directly to Brainstorm, Plan, Execute, or Document mode.");
+
     help
 }

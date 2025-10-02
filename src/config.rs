@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use dirs;
 
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
+const LEGACY_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
 /// Main application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -237,7 +240,7 @@ impl Default for Config {
         // OpenRouter (aggregator)
         model_providers.insert("openrouter".to_string(), ModelProvider {
             name: "OpenRouter".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
+            base_url: OPENROUTER_BASE_URL.to_string(),
             api_key_env: Some("OPENROUTER_API_KEY".to_string()),
             models: vec![
                 ModelInfo {
@@ -245,6 +248,12 @@ impl Default for Config {
                     name: "GPT-5 (via OpenRouter)".to_string(),
                     description: "Latest flagship via OpenRouter".to_string(),
                     is_premium: true,
+                },
+                ModelInfo {
+                    id: "openai/gpt-oss-120b:free".to_string(),
+                    name: "GPT-OSS 120B (free) (via OpenRouter)".to_string(),
+                    description: "Open-source GPT-class model available on the free tier.".to_string(),
+                    is_premium: false,
                 },
                 ModelInfo {
                     id: "anthropic/claude-3-5-sonnet-4.5".to_string(),
@@ -259,8 +268,8 @@ impl Default for Config {
                     is_premium: true,
                 },
                 ModelInfo {
-                    id: "x-ai/grok-4".to_string(),
-                    name: "Grok-4 (via OpenRouter)".to_string(),
+                    id: "x-ai/grok-4-fast:free".to_string(),
+                    name: "Grok-4-fast (free) (via OpenRouter)".to_string(),
                     description: "Latest Grok via OpenRouter".to_string(),
                     is_premium: true,
                 },
@@ -277,15 +286,15 @@ impl Default for Config {
                     is_premium: true,
                 },
                 ModelInfo {
-                    id: "meta-llama/llama-3.1-70b-instruct".to_string(),
-                    name: "Llama 3.1 70B (via OpenRouter)".to_string(),
-                    description: "Strong open source model".to_string(),
+                    id: "z-ai/glm-4.5-air:free".to_string(),
+                    name: "Z.AI GLM 4.5 Air (free) (via OpenRouter)".to_string(),
+                    description: "Purpose-built for agent-centric applications.".to_string(),
                     is_premium: false,
                 },
                 ModelInfo {
-                    id: "mistralai/mistral-7b-instruct".to_string(),
-                    name: "Mistral 7B (via OpenRouter)".to_string(),
-                    description: "Fast and efficient open source".to_string(),
+                    id: "mistralai/mistral-small-3.2-24b-instruct:free".to_string(),
+                    name: "Mistral 24B Instruct (free) (via OpenRouter)".to_string(),
+                    description: "Mistral optimized for instruction following, repetition reduction, and improved function calling.".to_string(),
                     is_premium: false,
                 },
                 ModelInfo {
@@ -373,18 +382,30 @@ impl Config {
     
     /// Check if API key is configured for current provider
     pub fn has_api_key(&self) -> bool {
-        self.api_keys.contains_key(&self.selected_provider) ||
-        self.get_current_provider()
-            .and_then(|p| p.api_key_env.as_ref())
-            .map(|env| std::env::var(env).is_ok())
-            .unwrap_or(false)
+        self.has_api_key_for(&self.selected_provider)
+    }
+    
+    /// Check if API key is configured for a specific provider
+    pub fn has_api_key_for(&self, provider_id: &str) -> bool {
+        self.api_keys.contains_key(provider_id) ||
+            self.model_providers
+                .get(provider_id)
+                .and_then(|p| p.api_key_env.as_ref())
+                .map(|env| std::env::var(env).is_ok())
+                .unwrap_or(false)
     }
     
     /// Get API key from config or environment
     pub fn get_api_key(&self) -> Option<String> {
-        self.api_keys.get(&self.selected_provider).cloned()
+        self.get_api_key_for(&self.selected_provider)
+    }
+
+    /// Get API key for a specific provider from config or environment
+    pub fn get_api_key_for(&self, provider_id: &str) -> Option<String> {
+        self.api_keys.get(provider_id).cloned()
             .or_else(|| {
-                self.get_current_provider()
+                self.model_providers
+                    .get(provider_id)
                     .and_then(|p| p.api_key_env.as_ref())
                     .and_then(|env| std::env::var(env).ok())
             })
@@ -400,9 +421,11 @@ impl Config {
         self.selected_provider = provider;
     }
     
-    /// Get available providers
+    /// Get available providers sorted by display name
     pub fn get_providers(&self) -> Vec<(&String, &ModelProvider)> {
-        self.model_providers.iter().collect()
+        let mut providers: Vec<(&String, &ModelProvider)> = self.model_providers.iter().collect();
+        providers.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        providers
     }
     
     /// Set custom model for OpenRouter
@@ -482,9 +505,16 @@ impl Config {
         
         let api_keys = config_toml.api_keys.unwrap_or_default();
         
-        let model_providers = if let Some(providers_toml) = config_toml.model_providers {
+        let mut model_providers = if let Some(providers_toml) = config_toml.model_providers {
             providers_toml.into_iter()
                 .map(|(id, provider_toml)| {
+                    let mut base_url = provider_toml.base_url;
+                    if id == "openrouter" {
+                        let normalized = base_url.trim_end_matches('/');
+                        if normalized == LEGACY_OPENROUTER_BASE_URL {
+                            base_url = OPENROUTER_BASE_URL.to_string();
+                        }
+                    }
                     let models = provider_toml.models.into_iter()
                         .map(|model_toml| ModelInfo {
                             id: model_toml.id,
@@ -496,7 +526,7 @@ impl Config {
                     
                     (id, ModelProvider {
                         name: provider_toml.name,
-                        base_url: provider_toml.base_url,
+                        base_url,
                         api_key_env: provider_toml.api_key_env,
                         models,
                     })
@@ -505,6 +535,8 @@ impl Config {
         } else {
             Self::create_default_model_providers()
         };
+
+        Self::merge_builtin_provider_catalog(&mut model_providers);
         
         let ui = if let Some(ui_toml) = config_toml.ui {
             UiConfig {
@@ -532,7 +564,7 @@ impl Config {
             ui,
         })
     }
-    
+
     /// Create default model providers
     fn create_default_model_providers() -> HashMap<String, ModelProvider> {
         let mut model_providers = HashMap::new();
@@ -644,11 +676,11 @@ impl Config {
                 },
             ],
         });
-        
+
         // OpenRouter (aggregator)
         model_providers.insert("openrouter".to_string(), ModelProvider {
             name: "OpenRouter".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
+            base_url: OPENROUTER_BASE_URL.to_string(),
             api_key_env: Some("OPENROUTER_API_KEY".to_string()),
             models: vec![
                 ModelInfo {
@@ -656,6 +688,12 @@ impl Config {
                     name: "GPT-5 (via OpenRouter)".to_string(),
                     description: "Latest flagship via OpenRouter".to_string(),
                     is_premium: true,
+                },
+                ModelInfo {
+                    id: "openai/gpt-oss-120b:free".to_string(),
+                    name: "GPT-OSS 120B (free) (via OpenRouter)".to_string(),
+                    description: "Open-source GPT-class model available on the free tier.".to_string(),
+                    is_premium: false,
                 },
                 ModelInfo {
                     id: "anthropic/claude-3-5-sonnet-4.5".to_string(),
@@ -670,8 +708,8 @@ impl Config {
                     is_premium: true,
                 },
                 ModelInfo {
-                    id: "x-ai/grok-4".to_string(),
-                    name: "Grok-4 (via OpenRouter)".to_string(),
+                    id: "x-ai/grok-4-fast:free".to_string(),
+                    name: "Grok-4-fast (free) (via OpenRouter)".to_string(),
                     description: "Latest Grok via OpenRouter".to_string(),
                     is_premium: true,
                 },
@@ -688,15 +726,15 @@ impl Config {
                     is_premium: true,
                 },
                 ModelInfo {
-                    id: "meta-llama/llama-3.1-70b-instruct".to_string(),
-                    name: "Llama 3.1 70B (via OpenRouter)".to_string(),
-                    description: "Strong open source model".to_string(),
+                    id: "z-ai/glm-4.5-air:free".to_string(),
+                    name: "Z.AI GLM 4.5 Air (free) (via OpenRouter)".to_string(),
+                    description: "Purpose-built for agent-centric applications.".to_string(),
                     is_premium: false,
                 },
                 ModelInfo {
-                    id: "mistralai/mistral-7b-instruct".to_string(),
-                    name: "Mistral 7B (via OpenRouter)".to_string(),
-                    description: "Fast and efficient open source".to_string(),
+                    id: "mistralai/mistral-small-3.2-24b-instruct:free".to_string(),
+                    name: "Mistral 24B Instruct (free) (via OpenRouter)".to_string(),
+                    description: "Mistral optimized for instruction following, repetition reduction, and improved function calling.".to_string(),
                     is_premium: false,
                 },
                 ModelInfo {
@@ -707,7 +745,7 @@ impl Config {
                 },
             ],
         });
-        
+
         // Mistral AI (Direct API)
         model_providers.insert("mistral".to_string(), ModelProvider {
             name: "Mistral AI".to_string(),
@@ -730,6 +768,21 @@ impl Config {
         });
         
         model_providers
+    }
+
+    /// Ensure built-in providers are present and up-to-date in the configuration
+    fn merge_builtin_provider_catalog(model_providers: &mut HashMap<String, ModelProvider>) {
+        let builtin = Self::create_default_model_providers();
+        for (provider_id, builtin_provider) in builtin {
+            model_providers
+                .entry(provider_id.clone())
+                .and_modify(|existing| {
+                    existing.base_url = builtin_provider.base_url.clone();
+                    existing.api_key_env = builtin_provider.api_key_env.clone();
+                    existing.models = builtin_provider.models.clone();
+                })
+                .or_insert(builtin_provider);
+        }
     }
     
     /// Convert to TOML config

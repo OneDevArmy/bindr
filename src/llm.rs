@@ -29,6 +29,8 @@ pub struct LlmRequest {
     pub mode: BindrMode,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 
 /// Message in conversation
@@ -69,16 +71,21 @@ impl LlmClient {
             return Ok(rx);
         }
         
-        let provider = self.config.get_current_provider()
-            .ok_or_else(|| anyhow::anyhow!("No provider configured"))?;
-        
-        let api_key = self.config.get_api_key()
-            .ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+        let provider_id = request.provider_id.clone()
+            .unwrap_or_else(|| self.config.selected_provider.clone());
+
+        let provider = self.config.model_providers
+            .get(&provider_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for id {}", provider_id))?
+            .clone();
+
+        let api_key = self.config.get_api_key_for(&provider_id)
+            .ok_or_else(|| anyhow::anyhow!("No API key configured for provider {}", provider_id))?;
+
+        let model = request.model_id.clone().unwrap_or_else(|| self.config.default_model.clone());
 
         // Spawn streaming task
         let client = self.client.clone();
-        let provider = provider.clone();
-        let model = self.config.default_model.clone();
         
         let tx_clone = tx.clone();
         tokio::spawn(async move {
@@ -325,8 +332,18 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenRouter API error: {}", error_text));
+            let detail = if error_text.trim().is_empty() {
+                "<empty response>".to_string()
+            } else {
+                error_text
+            };
+            return Err(anyhow::anyhow!(
+                "OpenRouter API error (status {}): {}",
+                status,
+                detail
+            ));
         }
 
         Self::process_sse_stream(response, tx).await
@@ -524,30 +541,45 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
+            buffer.extend_from_slice(&chunk?);
         }
 
-        // Google returns the complete response at once, not as SSE
-        if let Ok(response_array) = serde_json::from_str::<Vec<serde_json::Value>>(&buffer) {
-            if let Some(response_json) = response_array.get(0) {
-                if let Some(candidates) = response_json.get("candidates").and_then(|c| c.get(0)) {
-                    if let Some(content) = candidates.get("content") {
-                        if let Some(parts) = content.get("parts") {
-                            if let Some(part) = parts.get(0) {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    // Simulate streaming by sending text in chunks
-                                    Self::simulate_streaming(text, tx.clone()).await;
-                                }
-                            }
-                        }
+        let buffer_str = String::from_utf8_lossy(&buffer);
+        let mut latest_text = String::new();
+
+        // Google returns JSON objects per chunk (often wrapped in an array when complete)
+        if let Ok(response_array) = serde_json::from_str::<Vec<serde_json::Value>>(&buffer_str) {
+            for response_json in response_array {
+                if let Some(chunk_text) = Self::extract_google_text(&response_json) {
+                    if chunk_text.len() > latest_text.len() {
+                        latest_text = chunk_text;
                     }
                 }
             }
+        } else if let Ok(response_json) = serde_json::from_str::<serde_json::Value>(&buffer_str) {
+            if let Some(chunk_text) = Self::extract_google_text(&response_json) {
+                if chunk_text.len() > latest_text.len() {
+                    latest_text = chunk_text;
+                }
+            }
+        } else {
+            // Attempt to parse concatenated JSON objects without delimiters
+            let mut deserializer = serde_json::Deserializer::from_str(&buffer_str).into_iter::<serde_json::Value>();
+            while let Some(Ok(value)) = deserializer.next() {
+                if let Some(chunk_text) = Self::extract_google_text(&value) {
+                    if chunk_text.len() > latest_text.len() {
+                        latest_text = chunk_text;
+                    }
+                }
+            }
+        }
+
+        if !latest_text.is_empty() {
+            Self::simulate_streaming(&latest_text, tx.clone()).await;
+            let _ = tx.send(LlmEvent::ResponseComplete(latest_text)).await;
         }
         let _ = tx.send(LlmEvent::StreamComplete).await;
         Ok(())
@@ -580,6 +612,39 @@ impl LlmClient {
             }
         }
     }
+
+    /// Extract concatenated text from Google response JSON
+    fn extract_google_text(value: &serde_json::Value) -> Option<String> {
+        let mut collected = String::new();
+
+        if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
+            for candidate in candidates {
+                let parts_iter = candidate
+                    .get("content")
+                    .and_then(|content| {
+                        if content.is_array() {
+                            content.as_array().cloned()
+                        } else {
+                            content.get("parts").and_then(|parts| parts.as_array().cloned())
+                        }
+                    })
+                    .into_iter()
+                    .flatten();
+
+                for part in parts_iter {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                        collected.push_str(text);
+                    }
+                }
+            }
+        }
+
+        if collected.is_empty() {
+            None
+        } else {
+            Some(collected)
+        }
+    }
 }
 
 /// Helper to create system messages for different modes
@@ -590,6 +655,8 @@ impl LlmRequest {
             mode,
             temperature: None,
             max_tokens: None,
+            provider_id: None,
+            model_id: None,
         }
     }
 
@@ -602,6 +669,22 @@ impl LlmRequest {
     #[allow(dead_code)]
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens = Some(tokens);
+        self
+    }
+
+    pub fn with_provider<S: Into<String>>(mut self, provider: S) -> Self {
+        let value = provider.into();
+        if !value.is_empty() {
+            self.provider_id = Some(value);
+        }
+        self
+    }
+
+    pub fn with_model<S: Into<String>>(mut self, model: S) -> Self {
+        let value = model.into();
+        if !value.is_empty() {
+            self.model_id = Some(value);
+        }
         self
     }
 

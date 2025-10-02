@@ -2,7 +2,7 @@ use crate::agent::AgentManager;
 use crate::config::Config;
 use crate::events::BindrMode;
 use crate::llm::LlmClient;
-use crate::ui::conversation::{ConversationComposer, ConversationHistory, StreamingResponse, SlashCommand, get_help_text};
+use crate::ui::conversation::{ConversationComposer, ConversationHistory, StreamingResponse, SlashCommand, ParsedCommand, get_help_text};
 use anyhow::Result;
 use ratatui::{
     buffer::Buffer,
@@ -195,10 +195,14 @@ impl ConversationManager {
     }
 
     /// Handle slash commands
-    async fn handle_slash_command(&mut self, command: SlashCommand) -> Result<ConversationAction> {
-        match command {
+    async fn handle_slash_command(&mut self, command: ParsedCommand) -> Result<ConversationAction> {
+        match command.command {
             SlashCommand::Mode => {
-                // Cycle through modes
+                if let Some(target_mode) = command.mode_target() {
+                    self.switch_mode(target_mode).await?;
+                    return Ok(ConversationAction::None);
+                }
+
                 let next_mode = match self.current_mode {
                     BindrMode::Brainstorm => BindrMode::Plan,
                     BindrMode::Plan => BindrMode::Execute,
@@ -214,14 +218,14 @@ impl ConversationManager {
             SlashCommand::Bye => {
                 Ok(ConversationAction::Exit)
             }
-                    SlashCommand::Help => {
-                        let help_text = get_help_text();
-                        self.history.add_system_message(help_text, self.current_mode);
-                        Ok(ConversationAction::None)
-                    }
-                    SlashCommand::Model => {
-                        Ok(ConversationAction::ShowModelSelection)
-                    }
+            SlashCommand::Help => {
+                let help_text = get_help_text();
+                self.history.add_system_message(help_text, self.current_mode);
+                Ok(ConversationAction::None)
+            }
+            SlashCommand::Model => {
+                Ok(ConversationAction::ShowModelSelection)
+            }
         }
     }
 
