@@ -10,6 +10,7 @@ use ratatui::{
     widgets::Widget,
 };
 use tokio::sync::mpsc;
+use tracing::{debug, info};
 
 /// Actions that can be requested by the conversation manager
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ impl ConversationManager {
     pub fn start_conversation(&mut self) {
         self.is_active = true;
         self.composer.set_focus(true);
+        info!(mode = self.current_mode.display_name(), "conversation started");
         self.history.add_system_message(
             format!("Started {} mode", self.current_mode.display_name()),
             self.current_mode,
@@ -66,6 +68,8 @@ impl ConversationManager {
         if input.trim().is_empty() {
             return Ok(());
         }
+
+        debug!(mode = self.current_mode.display_name(), input_length = input.len(), "processing user input");
 
         // Add user message to history
         self.history.add_user_message(input.clone(), self.current_mode);
@@ -107,6 +111,16 @@ impl ConversationManager {
                         }
                         // Stream complete - finalize message
                         if !self.current_streaming_message.is_empty() {
+                            info!(
+                                mode = self.current_mode.display_name(),
+                                response_length = self.current_streaming_message.len(),
+                                "received complete LLM response"
+                            );
+                            debug!(
+                                mode = self.current_mode.display_name(),
+                                response = %self.current_streaming_message,
+                                "LLM response content"
+                            );
                             self.history.add_assistant_message(
                                 self.current_streaming_message.clone(),
                                 self.current_mode,
@@ -128,6 +142,13 @@ impl ConversationManager {
         if new_mode == self.current_mode {
             return Ok(());
         }
+
+        let previous_mode = self.current_mode;
+        info!(
+            from = previous_mode.display_name(),
+            to = new_mode.display_name(),
+            "switching conversation mode"
+        );
 
         // Switch agent mode
         self.agent_manager.orchestrator_mut().switch_mode(new_mode).await?;
