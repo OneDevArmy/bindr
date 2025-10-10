@@ -1,10 +1,11 @@
 use crate::config::{Config, ModelProvider};
 use crate::events::BindrMode;
 use anyhow::Result;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-use futures::StreamExt;
+use tracing::{debug, error, info, trace};
 
 /// Events emitted during LLM streaming
 #[derive(Debug, Clone)]
@@ -57,46 +58,70 @@ impl LlmClient {
         Self { config, client }
     }
 
-
     /// Stream a response from the configured LLM provider
-    pub async fn stream_response(
-        &self,
-        request: LlmRequest,
-    ) -> Result<mpsc::Receiver<LlmEvent>> {
+    pub async fn stream_response(&self, request: LlmRequest) -> Result<mpsc::Receiver<LlmEvent>> {
         let (tx, rx) = mpsc::channel(1000);
 
         // Check if we have an API key configured
         if !self.config.has_api_key() {
-            let _ = tx.send(LlmEvent::Error("No API key configured. Please add an API key first.".to_string())).await;
+            error!(event = "llm_request_failed", reason = "missing_api_key");
+            let _ = tx
+                .send(LlmEvent::Error(
+                    "No API key configured. Please add an API key first.".to_string(),
+                ))
+                .await;
             return Ok(rx);
         }
-        
-        let provider_id = request.provider_id.clone()
+
+        let provider_id = request
+            .provider_id
+            .clone()
             .unwrap_or_else(|| self.config.selected_provider.clone());
 
-        let provider = self.config.model_providers
+        let provider = self
+            .config
+            .model_providers
             .get(&provider_id)
             .ok_or_else(|| anyhow::anyhow!("No provider configured for id {}", provider_id))?
             .clone();
 
-        let api_key = self.config.get_api_key_for(&provider_id)
+        let api_key = self
+            .config
+            .get_api_key_for(&provider_id)
             .ok_or_else(|| anyhow::anyhow!("No API key configured for provider {}", provider_id))?;
 
-        let model = request.model_id.clone().unwrap_or_else(|| self.config.default_model.clone());
+        let model = request
+            .model_id
+            .clone()
+            .unwrap_or_else(|| self.config.default_model.clone());
+
+        let message_count = request.messages.len();
+        let temperature = request.temperature.unwrap_or(0.7);
+        let max_tokens = request.max_tokens.unwrap_or(4000);
+        let mode = request.mode;
+        let provider_name = provider.name.clone();
+
+        info!(
+            event = "llm_api_call",
+            provider = provider_name.as_str(),
+            provider_id = provider_id.as_str(),
+            model = model.as_str(),
+            mode = mode.display_name(),
+            message_count,
+            temperature,
+            max_tokens,
+            "dispatching streaming request"
+        );
 
         // Spawn streaming task
         let client = self.client.clone();
-        
+
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = Self::stream_from_provider(
-                client,
-                provider,
-                model,
-                api_key,
-                request,
-                tx,
-            ).await {
+            if let Err(e) =
+                Self::stream_from_provider(client, provider, model, api_key, request, tx).await
+            {
+                error!(event = "llm_stream_error", error = %e);
                 let _ = tx_clone.send(LlmEvent::Error(e.to_string())).await;
             }
         });
@@ -115,10 +140,14 @@ impl LlmClient {
     ) -> Result<()> {
         match provider.name.to_lowercase().as_str() {
             "openai" => Self::stream_openai(client, provider, model, api_key, request, tx).await,
-            "anthropic" => Self::stream_anthropic(client, provider, model, api_key, request, tx).await,
+            "anthropic" => {
+                Self::stream_anthropic(client, provider, model, api_key, request, tx).await
+            }
             "google" => Self::stream_google(client, provider, model, api_key, request, tx).await,
             "xai" => Self::stream_xai(client, provider, model, api_key, request, tx).await,
-            "openrouter" => Self::stream_openrouter(client, provider, model, api_key, request, tx).await,
+            "openrouter" => {
+                Self::stream_openrouter(client, provider, model, api_key, request, tx).await
+            }
             "mistral" => Self::stream_mistral(client, provider, model, api_key, request, tx).await,
             _ => Err(anyhow::anyhow!("Unsupported provider: {}", provider.name)),
         }
@@ -134,7 +163,7 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/chat/completions", provider.base_url);
-        
+
         let payload = serde_json::json!({
             "model": model,
             "messages": request.messages,
@@ -142,6 +171,14 @@ impl LlmClient {
             "temperature": request.temperature.unwrap_or(0.7),
             "max_tokens": request.max_tokens.unwrap_or(4000)
         });
+
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending OpenAI streaming request"
+        );
 
         let response = client
             .post(&url)
@@ -152,9 +189,24 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "OpenAI API returned error"
+            );
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("OpenAI API error: {}", error_text));
         }
+
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "OpenAI response accepted"
+        );
 
         Self::process_sse_stream(response, tx).await
     }
@@ -169,11 +221,11 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/messages", provider.base_url);
-        
+
         // Convert messages to Anthropic format
         let mut messages = Vec::new();
         let mut system = String::new();
-        
+
         for msg in request.messages {
             if msg.role == "system" {
                 system = msg.content;
@@ -194,6 +246,14 @@ impl LlmClient {
             "max_tokens": request.max_tokens.unwrap_or(4000)
         });
 
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending Anthropic streaming request"
+        );
+
         let response = client
             .post(&url)
             .header("x-api-key", api_key)
@@ -204,9 +264,24 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "Anthropic API returned error"
+            );
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("Anthropic API error: {}", error_text));
         }
+
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "Anthropic response accepted"
+        );
 
         Self::process_anthropic_stream(response, tx).await
     }
@@ -220,13 +295,15 @@ impl LlmClient {
         request: LlmRequest,
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
-        let url = format!("{}/models/{}:streamGenerateContent?key={}", 
-                         provider.base_url, model, api_key);
-        
+        let url = format!(
+            "{}/models/{}:streamGenerateContent?key={}",
+            provider.base_url, model, api_key
+        );
+
         // Convert messages to Gemini format
         let mut contents = Vec::new();
         let mut system_instruction = String::new();
-        
+
         for msg in request.messages {
             if msg.role == "system" {
                 system_instruction = msg.content;
@@ -252,6 +329,14 @@ impl LlmClient {
             });
         }
 
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending Google Gemini streaming request"
+        );
+
         let response = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -260,9 +345,24 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "Google Gemini API returned error"
+            );
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("Google API error: {}", error_text));
         }
+
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "Google Gemini response accepted"
+        );
 
         Self::process_google_stream(response, tx).await
     }
@@ -277,7 +377,7 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/chat/completions", provider.base_url);
-        
+
         let payload = serde_json::json!({
             "model": model,
             "messages": request.messages,
@@ -285,6 +385,14 @@ impl LlmClient {
             "temperature": request.temperature.unwrap_or(0.7),
             "max_tokens": request.max_tokens.unwrap_or(4000)
         });
+
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending xAI streaming request"
+        );
 
         let response = client
             .post(&url)
@@ -295,9 +403,24 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "xAI API returned error"
+            );
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("xAI API error: {}", error_text));
         }
+
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "xAI response accepted"
+        );
 
         Self::process_sse_stream(response, tx).await
     }
@@ -312,7 +435,7 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/chat/completions", provider.base_url);
-        
+
         let payload = serde_json::json!({
             "model": model,
             "messages": request.messages,
@@ -320,6 +443,14 @@ impl LlmClient {
             "temperature": request.temperature.unwrap_or(0.7),
             "max_tokens": request.max_tokens.unwrap_or(4000)
         });
+
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending OpenRouter streaming request"
+        );
 
         let response = client
             .post(&url)
@@ -332,6 +463,13 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "OpenRouter API returned error"
+            );
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             let detail = if error_text.trim().is_empty() {
@@ -346,6 +484,14 @@ impl LlmClient {
             ));
         }
 
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "OpenRouter response accepted"
+        );
+
         Self::process_sse_stream(response, tx).await
     }
 
@@ -359,7 +505,7 @@ impl LlmClient {
         tx: mpsc::Sender<LlmEvent>,
     ) -> Result<()> {
         let url = format!("{}/v1/chat/completions", provider.base_url);
-        
+
         let payload = serde_json::json!({
             "model": model,
             "messages": request.messages,
@@ -367,6 +513,14 @@ impl LlmClient {
             "temperature": request.temperature.unwrap_or(0.7),
             "max_tokens": request.max_tokens.unwrap_or(4000)
         });
+
+        info!(
+            event = "llm_http_request",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            url = %url,
+            "sending Mistral streaming request"
+        );
 
         let response = client
             .post(&url)
@@ -377,9 +531,24 @@ impl LlmClient {
             .await?;
 
         if !response.status().is_success() {
+            error!(
+                event = "llm_http_error",
+                provider = provider.name.as_str(),
+                model = model.as_str(),
+                status = %response.status(),
+                "Mistral API returned error"
+            );
             let error_text = response.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("Mistral API error: {}", error_text));
         }
+
+        debug!(
+            event = "llm_http_response",
+            provider = provider.name.as_str(),
+            model = model.as_str(),
+            status = %response.status(),
+            "Mistral response accepted"
+        );
 
         Self::process_sse_stream(response, tx).await
     }
@@ -395,6 +564,7 @@ impl LlmClient {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            trace!(event = "llm_stream_chunk", bytes = chunk.len());
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
 
@@ -418,16 +588,21 @@ impl LlmClient {
                         if let Some(choices) = chunk.get("choices").and_then(|c| c.get(0)) {
                             // Handle streaming deltas
                             if let Some(delta) = choices.get("delta") {
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+                                {
                                     assistant_text.push_str(content);
                                     let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
                                 }
                             }
-                            
+
                             // Handle finish_reason
-                            if let Some(finish_reason) = choices.get("finish_reason").and_then(|v| v.as_str()) {
+                            if let Some(finish_reason) =
+                                choices.get("finish_reason").and_then(|v| v.as_str())
+                            {
                                 if finish_reason == "stop" && !assistant_text.is_empty() {
-                                    let _ = tx.send(LlmEvent::ResponseComplete(assistant_text.clone())).await;
+                                    let _ = tx
+                                        .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                                        .await;
                                 }
                             }
                         }
@@ -473,6 +648,7 @@ impl LlmClient {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            trace!(event = "llm_stream_chunk", bytes = chunk.len());
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
 
@@ -499,11 +675,14 @@ impl LlmClient {
                                 let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
                             }
                         }
-                        
+
                         // Handle stop event
-                        if let Some(stop_reason) = chunk.get("stop_reason").and_then(|v| v.as_str()) {
+                        if let Some(stop_reason) = chunk.get("stop_reason").and_then(|v| v.as_str())
+                        {
                             if stop_reason == "end_turn" && !assistant_text.is_empty() {
-                                let _ = tx.send(LlmEvent::ResponseComplete(assistant_text.clone())).await;
+                                let _ = tx
+                                    .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                                    .await;
                             }
                         }
                     }
@@ -544,7 +723,9 @@ impl LlmClient {
         let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
-            buffer.extend_from_slice(&chunk?);
+            let chunk = chunk?;
+            trace!(event = "llm_stream_chunk", bytes = chunk.len());
+            buffer.extend_from_slice(&chunk);
         }
 
         let buffer_str = String::from_utf8_lossy(&buffer);
@@ -567,7 +748,8 @@ impl LlmClient {
             }
         } else {
             // Attempt to parse concatenated JSON objects without delimiters
-            let mut deserializer = serde_json::Deserializer::from_str(&buffer_str).into_iter::<serde_json::Value>();
+            let mut deserializer =
+                serde_json::Deserializer::from_str(&buffer_str).into_iter::<serde_json::Value>();
             while let Some(Ok(value)) = deserializer.next() {
                 if let Some(chunk_text) = Self::extract_google_text(&value) {
                     if chunk_text.len() > latest_text.len() {
@@ -596,17 +778,17 @@ impl LlmClient {
             }
         } else {
             let words: Vec<&str> = text.split_whitespace().collect();
-            
+
             for (i, word) in words.iter().enumerate() {
                 let chunk = if i == 0 {
                     word.to_string()
                 } else {
                     format!(" {}", word)
                 };
-                
+
                 // Send the chunk
                 let _ = tx.send(LlmEvent::TextDelta(chunk)).await;
-                
+
                 // Add a small delay to simulate typing
                 tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
             }
@@ -625,7 +807,9 @@ impl LlmClient {
                         if content.is_array() {
                             content.as_array().cloned()
                         } else {
-                            content.get("parts").and_then(|parts| parts.as_array().cloned())
+                            content
+                                .get("parts")
+                                .and_then(|parts| parts.as_array().cloned())
                         }
                     })
                     .into_iter()
@@ -687,5 +871,4 @@ impl LlmRequest {
         }
         self
     }
-
 }
