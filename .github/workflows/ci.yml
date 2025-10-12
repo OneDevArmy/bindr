@@ -29,9 +29,14 @@ jobs:
           components: clippy rustfmt
 
       - name: Install LLVM
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: 20.1.5
+        run: |
+          curl -L -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.5/clang+llvm-20.1.5-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          sudo mkdir -p /opt/llvm
+          sudo tar -xJf llvm.tar.xz -C /opt/llvm --strip-components=1
+          echo "/opt/llvm/bin" | sudo tee /etc/ld.so.conf.d/llvm.conf
+          sudo ldconfig
+          echo "/opt/llvm/bin" >> $GITHUB_PATH
+          echo "LLVM_DIR=/opt/llvm" >> $GITHUB_ENV
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
