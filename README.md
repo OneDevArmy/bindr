@@ -6,44 +6,48 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Built with Tokio](https://img.shields.io/badge/runtime-tokio-purple.svg)](https://tokio.rs)
 
-Bindr is a terminal-native micro-kernel for multi-agent software creation. It orchestrates specialized Brainstorm → Plan → Execute → Document agents that coordinate over an event-driven kernel, retain project context, and stream responses live while staying within guardrails you control.
+<p align="center">
+  <img src="bindr.png" alt="Bindr terminal UI" width="540" />
+</p>
 
-## Highlights
-- **Kernel-driven agents** – every mode runs as an isolated Tokio task with automatic restarts, lifecycle telemetry, and broadcast events for UI or automation consumers.
-- **Context that sticks** – conversation history, model choices, and project metadata persist through `SessionManager`, making it effortless to resume work or hand off between agents.
-- **Tool governance** – per-mode capability profiles keep risky operations gated; reviews and approvals surface through kernel notifications so humans stay in charge.
-- **Production ergonomics** – streaming TUI, structured logging, and environment warnings (e.g., running from `~`) keep teams informed before things go sideways.
+Bindr is a terminal-native orchestration engine for AI-assisted software creation. It coordinates specialized agents in Brainstorm → Plan → Execute → Document modes, streaming their collaboration through a responsive TUI while keeping humans in control of tools, context, and approvals.
 
-## Quick Start
+## Overview
+- **Agent-aware kernel**: Each mode runs inside an isolated Tokio task with supervised restarts, telemetry, and a broadcast event bus for downstream consumers.
+- **Stateful sessions**: Conversation history, model selections, and project metadata persist via `SessionManager`, enabling smooth handoffs and resumable work.
+- **Guardrails-first tooling**: Capability profiles and approval gates keep risky operations visible and auditable before execution.
+- **Built for operators**: Structured logging, live status panes, and environment warnings surface issues before they impact your workflow.
+
+## Installation
+Bindr ships as a cargo crate. Install the CLI with:
+
 ```bash
-# install
 cargo install bindr
+```
 
-# launch the TUI from your project directory
+The repository includes a `rust-toolchain.toml` that pins Rust `1.88.0` with `clippy` and `rustfmt` so local development matches CI.
+
+## Running Bindr
+Launch the TUI from the root of a project you want to work on:
+
+```bash
 bindr
 ```
-Add an API key when prompted, then explore commands like `/mode`, `/model`, and `/help` inside the conversation pane. Bindr will automatically route intents between mode agents and emit notifications as they save context or request tools. For web search, export your Tavily key before launching:
 
-```bash
-export TAVILY_API_KEY=sk_tavily_xxx
-```
+Inside the conversation pane you can explore `/mode`, `/model`, `/tools`, and `/help` to steer the agents. When a tool requires credentials (for example, web search), export the relevant API key as an environment variable before starting Bindr. The UI guides you through missing configuration at launch time.
 
-## Architecture Notes
-The kernel (`src/core/kernel.rs`) supervises agents via bounded queues and a broadcast event bus. `AgentRuntime` wires per-mode factories into the kernel, parses JSON tool calls emitted by the models, and either executes or queues the requests (with approvals surfaced in the TUI). Tool results, lifecycle events, and environment warnings flow back through kernel notifications so the UI can maintain an activity feed without interrupting the agents.
+## How It Works
+The kernel (`src/core/kernel.rs`) acts as the control plane. Mode-specific agents connect through `AgentRuntime`, exchange messages through bounded channels, and emit structured tool calls. The UI (`src/ui/`) renders streaming responses, actions awaiting approval, and system telemetry. Tool execution is sandboxed in `src/tools/`, with results streamed back into the session so context stays current.
 
-**Tool call contract:** when an agent needs a tool it emits a JSON envelope such as:
+## Development Workflow
+- Review `CONTRIBUTING.md` for environment setup, testing expectations, and submission guidelines.
+- Use `cargo fmt`, `cargo clippy -- -D warnings`, `cargo check`, and `cargo nextest run` before opening a pull request.
+- Document architectural changes in `docs/architecture.md` and keep `AGENTS.md` aligned with runtime responsibilities.
 
-```json
-{
-  "tool": "web_search",
-  "args": { "query": "tui framework ratatui guide", "max_results": 5 }
-}
-```
-
-If the tool requires approval, it appears in the side panel (`/approve` to authorize); otherwise the kernel executes it immediately and streams the output as a system message.
-
-## Contributing
-We welcome issues and pull requests. Run `cargo fmt && cargo check && cargo test` before submitting, and see `AGENTS.md` plus `docs/architecture.md` for deeper architectural guidance.
+## Support & Community
+- File issues or feature requests on GitHub.
+- Join discussions to propose larger architectural work before you start coding.
+- For security disclosures, email [security@bindrcli.com](mailto:security@bindrcli.com).
 
 ## License
-Licensed under the [Apache-2.0](./LICENSE) license.
+Bindr is licensed under [Apache-2.0](./LICENSE).

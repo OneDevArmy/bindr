@@ -1,29 +1,29 @@
 # Contributing to Bindr
 
-Thanks for helping evolve Bindr into a production-grade multi-agent runtime. This guide captures the workflow and quality bar we expect for every change.
+We’re excited that you’re interested in improving Bindr. This guide walks you through how we ship changes together while keeping the project stable and friendly.
 
-## Development Environment
-- **Rust toolchain**: Install the latest stable toolchain via [rustup](https://rustup.rs). Bindr targets Rust 2021.
-- **Components**: Ensure `rustfmt`, `clippy`, and `cargo-nextest` are installed.
-- **Optional tooling**: We recommend [`just`](https://github.com/casey/just) or simple shell aliases for running the task bundle below.
+## Getting Set Up
+- **Toolchain**: Install Rust using [rustup](https://rustup.rs). Bindr targets Rust 2021.
+- **Components**: Add `rustfmt`, `clippy`, and `cargo-nextest` so your environment matches CI.
+- **Nice-to-haves**: [`just`](https://github.com/casey/just) or your favorite task runner can simplify command bundles.
 
 ```bash
 rustup component add rustfmt clippy
 cargo install cargo-nextest
 ```
 
-## Repository Bootstrap
+## Project Basics
 - **Clone**: `git clone git@github.com:OneDevArmy/bindr.git && cd bindr`
-- **Secrets**: Export API keys (e.g. `TAVILY_API_KEY`) before running the TUI so tool calls can execute.
-- **Editor config**: Enable format-on-save and diagnostics for Rust.
+- **Configuration**: Set any provider API keys as environment variables before using the TUI.
+- **Editor**: Enable format-on-save and diagnostics for Rust so issues surface early.
 
 ## Branching & Commits
-- Use feature branches named `feat/<slug>`, `fix/<slug>`, or similar.
-- Follow the conventional commit style, e.g. `feat(kernel): add restart backoff telemetry`.
-- Keep commits focused. Squash before merging when the history is noisy.
+- Start work on a feature branch such as `feat/<slug>` or `fix/<slug>`.
+- Follow conventional commits, e.g. `feat(kernel): add restart backoff telemetry`.
+- Keep commits focused. Squash only if intermediate history is noisy.
 
-## Pre-commit Checklist
-Run the full validation suite locally before pushing:
+## Before You Push
+Run the full validation suite locally:
 
 ```bash
 cargo fmt --all
@@ -34,28 +34,28 @@ cargo nextest run --all-features
 ```
 
 - Add or update unit/integration tests for new behavior.
-- Document significant architectural changes in `docs/architecture.md`.
-- Update `README.md`, `PROMPT.md`, or `AGENTS.md` when user-facing flows or agent responsibilities change.
+- Capture architecture changes in `docs/architecture.md`.
+- Refresh `README.md`, `PROMPT.md`, or `AGENTS.md` when user-facing flows evolve.
 
-## Pull Request Expectations
-- **Description**: Summarize the change, highlight testing, and note risk mitigation.
-- **Screenshots / logs**: Include relevant TUI captures or `tracing` output when altering UX flows.
-- **Review scope**: Call out any intentional follow-ups to avoid hidden TODOs.
-- **CI green**: Ensure the `ci.yml` workflow passes before requesting review.
+## Opening a Pull Request
+- **Tell the story**: Summarize the change, note testing, and call out risks or follow-ups.
+- **Show the impact**: Include `tracing` output or TUI screenshots when UX or streaming behavior changes.
+- **Respect reviewers**: Avoid hidden TODOs and make sure CI is green before requesting review.
 
 ## Code Style & Architecture
-- Favor small, cohesive modules in `src/core/`, `src/agents/`, and `src/ui/`.
-- Public functions must include concise doc comments.
-- Prefer `anyhow` for application errors and `thiserror` for domain-specific enumerations.
-- Use `tracing` for structured logging; avoid `println!` except in CLI entry points.
-- Respect the guardrails in `AGENTS.md`: no speculative rewrites and ensure kernel stability.
+- Prefer small, cohesive modules under `src/core/`, `src/agents/`, and `src/ui/`.
+- Document all public functions with concise doc comments.
+- Use `anyhow` for application errors and `thiserror` for domain-specific error enums.
+- Leverage `tracing` for logging; reserve `println!` for CLI entry points.
+- Follow the guardrails in `AGENTS.md`—no speculative rewrites and keep the runtime stable.
 
-## Security & Secrets
-- Never commit API keys or secrets. Use environment variables and `.env` files ignored by Git.
-- Validate file paths before performing write operations to avoid accidental destructive actions.
+## Security
+- Never commit credentials or secrets. Use environment variables and ignore local `.env` files.
+- Validate file paths before writing to disk to prevent destructive operations.
+- Report security vulnerabilities to [security@bindrcli.com](mailto:security@bindrcli.com).
 
-## Getting Help
-- Open discussions for architectural proposals before large refactors.
-- Tag `@OneDevArmy/bindr-maintainers` on PRs requiring additional review.
+## Need a Hand?
+- Open a discussion for architectural proposals before large refactors.
+- Tag `@OneDevArmy/bindr-maintainers` when you need extra eyes on a PR.
 
-Thanks again for helping keep Bindr robust, maintainable, and transparent.
+Thanks for contributing! Every improvement helps build a more capable Bindr.
