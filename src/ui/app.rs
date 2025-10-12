@@ -10,13 +10,12 @@ use crate::{
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    Terminal,
+    Frame, Terminal,
     backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 use tracing::error;
 
@@ -103,11 +102,7 @@ impl App {
     }
 }
 
-fn draw_home_view(
-    f: &mut Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_home_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let header_text = vec![Line::from(vec![
         Span::styled(
             "Bindr",
@@ -266,11 +261,7 @@ fn draw_home_view(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_select_provider_view(
-    f: &mut Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_select_provider_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let providers = app.config.get_providers();
     let mut items = Vec::new();
 
@@ -466,11 +457,7 @@ fn draw_add_key_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_select_model_view(
-    f: &mut Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_select_model_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let header = Paragraph::new("Bindr")
         .style(
             Style::default()
@@ -564,11 +551,7 @@ fn draw_select_model_view(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_custom_model_input_view(
-    f: &mut Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_custom_model_input_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let header = Paragraph::new("Bindr")
         .style(
             Style::default()
@@ -672,11 +655,7 @@ fn draw_custom_model_input_view(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_model_selection_view(
-    f: &mut Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_model_selection_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let header = Paragraph::new("Bindr")
         .style(
             Style::default()
@@ -823,11 +802,7 @@ fn draw_model_selection_view(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_conversation_view(
-    f: &mut Frame<'_>,
-    app: &mut App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_conversation_view(f: &mut Frame<'_>, app: &mut App, chunks: Vec<ratatui::layout::Rect>) {
     if let Some(ref mut conversation_manager) = app.conversation_manager {
         conversation_manager.render_conversation_ui(chunks[1], f.buffer_mut());
     }
@@ -853,9 +828,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                 AppView::SelectProvider => draw_select_provider_view(f, app, chunks.to_vec()),
                 AppView::AddKey => draw_add_key_view(f, app, chunks.to_vec()),
                 AppView::SelectModel => draw_select_model_view(f, app, chunks.to_vec()),
-                AppView::CustomModelInput => {
-                    draw_custom_model_input_view(f, app, chunks.to_vec())
-                }
+                AppView::CustomModelInput => draw_custom_model_input_view(f, app, chunks.to_vec()),
                 AppView::Conversation => draw_conversation_view(f, app, chunks.to_vec()),
                 AppView::ModelSelection => draw_model_selection_view(f, app, chunks.to_vec()),
             }

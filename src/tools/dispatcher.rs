@@ -14,9 +14,7 @@ impl ToolDispatcher {
         let kind = invocation.tool.kind();
 
         if !capabilities.allowed_tools.contains(&kind) {
-            return Err(anyhow!(
-                "Tool {kind:?} is not permitted in {mode:?} mode"
-            ));
+            return Err(anyhow!("Tool {kind:?} is not permitted in {mode:?} mode"));
         }
 
         let requires_approval = !capabilities.auto_approve.contains(&kind);

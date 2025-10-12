@@ -102,9 +102,7 @@ impl ConversationComposer {
                 }
             }
             KeyCode::Tab => {
-                if self.show_command_palette.get()
-                    && self.apply_selected_command(&mut state)
-                {
+                if self.show_command_palette.get() && self.apply_selected_command(&mut state) {
                     return ConversationResult::None;
                 }
             }

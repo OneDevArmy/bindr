@@ -421,9 +421,7 @@ impl ModelProvider for GoogleProvider {
         } = ctx;
 
         let base = config.base_url.trim_end_matches('/');
-        let url = format!(
-            "{base}/models/{model}:streamGenerateContent?key={api_key}",
-        );
+        let url = format!("{base}/models/{model}:streamGenerateContent?key={api_key}",);
 
         let mut contents = Vec::new();
         let mut system_instruction = String::new();
