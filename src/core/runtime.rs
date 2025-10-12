@@ -121,7 +121,10 @@ pub async fn run_tui() -> Result<(), io::Error> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (mut app, _app_event_tx) = App::new(config, session_manager);
+    let mut app = App::new(config, session_manager).await.map_err(|err| {
+        error!(error = %err, "failed to initialize app state");
+        io::Error::new(io::ErrorKind::Other, err)
+    })?;
     let res = app::run_app(&mut terminal, &mut app).await;
 
     debug!("TUI event loop exited");

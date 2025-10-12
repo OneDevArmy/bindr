@@ -1,5 +1,13 @@
 use std::io;
 
+use crate::{
+    agent::AgentManager,
+    config::Config,
+    events::BindrMode,
+    session::SessionManager,
+    ui::conversation::{self, ConversationManager},
+};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     Terminal,
@@ -9,16 +17,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use tokio::sync::mpsc;
-
-use crate::{
-    agent::AgentManager,
-    config::Config,
-    events::{AppEvent, BindrMode},
-    session::SessionManager,
-    tools::ToolRequestOutcome,
-    ui::conversation::{self, ConversationManager},
-};
+use tracing::error;
 
 // Dark mode color palette
 const BG_PRIMARY: Color = Color::Rgb(16, 18, 24); // Deep blue-black
@@ -31,27 +30,6 @@ const ACCENT_YELLOW: Color = Color::Rgb(241, 196, 15); // Warm yellow
 const ACCENT_RED: Color = Color::Rgb(255, 85, 85); // Soft red
 const BORDER_COLOR: Color = Color::Rgb(48, 52, 70); // Subtle border
 
-struct AppState {
-    should_quit: bool,
-    show_model_selection: bool,
-    current_mode: BindrMode,
-    status_message: Option<String>,
-    pending_tool: Option<ToolRequestOutcome>,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            should_quit: false,
-            show_model_selection: false,
-            current_mode: BindrMode::Brainstorm,
-            status_message: None,
-            pending_tool: None,
-        }
-    }
-}
-
-#[allow(dead_code)]
 enum AppView {
     Home,
     SelectProvider,
@@ -60,10 +38,6 @@ enum AppView {
     CustomModelInput,
     Conversation,
     ModelSelection,
-    Brainstorm,
-    Plan,
-    Execute,
-    Document,
 }
 
 pub struct App {
@@ -71,49 +45,28 @@ pub struct App {
     key_input: String,
     custom_model_input: String,
     config: Config,
-    #[allow(dead_code)]
     agent_manager: AgentManager,
     conversation_manager: Option<ConversationManager>,
-    #[allow(dead_code)]
-    app_event_tx: mpsc::UnboundedSender<AppEvent>,
-    #[allow(dead_code)]
-    app_event_rx: mpsc::UnboundedReceiver<AppEvent>,
-    conversation_lines: Vec<Line<'static>>,
-    is_streaming: bool,
-    current_input: String,
-    state: AppState,
     provider_selection: usize,
     model_selection: usize,
     model_switch_selection: usize,
 }
 
 impl App {
-    pub fn new(
-        config: Config,
-        session_manager: SessionManager,
-    ) -> (Self, mpsc::UnboundedSender<AppEvent>) {
-        let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
-        let agent_manager = AgentManager::new(config.clone(), session_manager.clone());
+    pub async fn new(config: Config, session_manager: SessionManager) -> Result<Self> {
+        let agent_manager = AgentManager::new(config.clone(), session_manager.clone()).await?;
 
-        let app = App {
+        Ok(App {
             view: AppView::Home,
             key_input: String::new(),
             custom_model_input: String::new(),
             config,
             agent_manager,
             conversation_manager: None,
-            app_event_tx: app_event_tx.clone(),
-            app_event_rx,
-            conversation_lines: Vec::new(),
-            is_streaming: false,
-            current_input: String::new(),
-            state: AppState::default(),
             provider_selection: 0,
             model_selection: 0,
             model_switch_selection: 0,
-        };
-
-        (app, app_event_tx)
+        })
     }
 
     pub fn get_usage_info(&self) -> (u32, u32) {
@@ -121,33 +74,30 @@ impl App {
     }
 
     /// Start a new conversation
-    pub fn start_new_conversation(&mut self) {
+    pub async fn start_new_conversation(&mut self) -> Result<()> {
         if !self.config.has_api_key() {
             // No API key configured, go to provider selection
             self.view = AppView::SelectProvider;
-            return;
+            return Ok(());
         }
 
         // Create conversation manager
-        let llm_client = crate::llm::LlmClient::new(self.config.clone());
-        let mut conversation_manager = ConversationManager::new(
-            self.agent_manager.clone(),
-            llm_client,
-            BindrMode::Brainstorm,
-        );
+        let mut conversation_manager =
+            ConversationManager::new(self.agent_manager.clone(), BindrMode::Brainstorm).await?;
 
         // Start the conversation
         conversation_manager.start_conversation();
 
         self.conversation_manager = Some(conversation_manager);
         self.view = AppView::Conversation;
+        Ok(())
     }
 
-    pub fn sync_runtime_config(&mut self) {
+    pub async fn sync_runtime_config(&mut self) {
         let config_clone = self.config.clone();
-        self.agent_manager.update_config(config_clone.clone());
+        self.agent_manager.update_config(config_clone.clone()).await;
         if let Some(ref mut conversation_manager) = self.conversation_manager {
-            conversation_manager.update_config(config_clone);
+            conversation_manager.update_config(config_clone).await;
         }
     }
 }
@@ -723,80 +673,6 @@ fn draw_custom_model_input_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_brainstorm_view<B: Backend>(
-    f: &mut ratatui::Frame,
-    _app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
-    let content = Paragraph::new("🧠 Brainstorm Mode - Coming Soon!")
-        .style(Style::default().fg(ACCENT_BLUE).bg(BG_PRIMARY))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR))
-                .title(Span::styled(
-                    " Brainstorm ",
-                    Style::default().fg(ACCENT_BLUE),
-                )),
-        );
-    f.render_widget(content, chunks[1]);
-}
-
-fn draw_plan_view<B: Backend>(
-    f: &mut ratatui::Frame,
-    _app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
-    let content = Paragraph::new("📋 Plan Mode - Coming Soon!")
-        .style(Style::default().fg(ACCENT_GREEN).bg(BG_PRIMARY))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR))
-                .title(Span::styled(" Plan ", Style::default().fg(ACCENT_GREEN))),
-        );
-    f.render_widget(content, chunks[1]);
-}
-
-fn draw_execute_view<B: Backend>(
-    f: &mut ratatui::Frame,
-    _app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
-    let content = Paragraph::new("⚡ Execute Mode - Coming Soon!")
-        .style(Style::default().fg(ACCENT_YELLOW).bg(BG_PRIMARY))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR))
-                .title(Span::styled(
-                    " Execute ",
-                    Style::default().fg(ACCENT_YELLOW),
-                )),
-        );
-    f.render_widget(content, chunks[1]);
-}
-
-fn draw_document_view<B: Backend>(
-    f: &mut ratatui::Frame,
-    _app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
-    let content = Paragraph::new("📝 Document Mode - Coming Soon!")
-        .style(Style::default().fg(ACCENT_RED).bg(BG_PRIMARY))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER_COLOR))
-                .title(Span::styled(" Document ", Style::default().fg(ACCENT_RED))),
-        );
-    f.render_widget(content, chunks[1]);
-}
-
 fn draw_model_selection_view<B: Backend>(
     f: &mut ratatui::Frame,
     app: &App,
@@ -979,10 +855,6 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                 }
                 AppView::Conversation => draw_conversation_view::<B>(f, app, chunks.to_vec()),
                 AppView::ModelSelection => draw_model_selection_view::<B>(f, app, chunks.to_vec()),
-                AppView::Brainstorm => draw_brainstorm_view::<B>(f, app, chunks.to_vec()),
-                AppView::Plan => draw_plan_view::<B>(f, app, chunks.to_vec()),
-                AppView::Execute => draw_execute_view::<B>(f, app, chunks.to_vec()),
-                AppView::Document => draw_document_view::<B>(f, app, chunks.to_vec()),
             }
         })?;
 
@@ -996,7 +868,9 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                     AppView::Home => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
                         KeyCode::Char('n') | KeyCode::Char('N') => {
-                            app.start_new_conversation();
+                            if let Err(err) = app.start_new_conversation().await {
+                                error!("failed to start conversation: {err}");
+                            }
                         }
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             return Ok(());
@@ -1019,7 +893,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                     eprintln!("Failed to save config: {}", e);
                                 }
 
-                                app.sync_runtime_config();
+                                app.sync_runtime_config().await;
 
                                 app.key_input.clear();
                                 app.view = AppView::SelectModel;
@@ -1069,7 +943,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                         .unwrap_or(false);
 
                                 app.config.set_selected_provider(provider_id_str);
-                                app.sync_runtime_config();
+                                app.sync_runtime_config().await;
 
                                 if has_api_key {
                                     app.view = AppView::SelectModel;
@@ -1108,7 +982,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                             eprintln!("Failed to save config: {}", e);
                                         }
 
-                                        app.sync_runtime_config();
+                                        app.sync_runtime_config().await;
 
                                         app.view = AppView::Home;
                                     }
@@ -1133,7 +1007,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                     eprintln!("Failed to save config: {}", e);
                                 }
 
-                                app.sync_runtime_config();
+                                app.sync_runtime_config().await;
 
                                 app.view = AppView::Home;
                                 app.custom_model_input.clear();
@@ -1219,7 +1093,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                     eprintln!("Failed to save config: {}", e);
                                 }
 
-                                app.sync_runtime_config();
+                                app.sync_runtime_config().await;
 
                                 app.view = AppView::Conversation;
                                 if let Some(ref mut cm) = app.conversation_manager {
@@ -1232,13 +1106,6 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                             if let Some(ref mut cm) = app.conversation_manager {
                                 cm.set_focus(true);
                             }
-                        }
-                        _ => {}
-                    },
-                    _ => match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
-                        KeyCode::Esc => {
-                            app.view = AppView::Home;
                         }
                         _ => {}
                     },

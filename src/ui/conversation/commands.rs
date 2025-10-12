@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::events::BindrMode;
 
-use strum::{IntoEnumIterator, AsRefStr, EnumIter, EnumString, IntoStaticStr};
+use strum::{AsRefStr, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 /// Commands that can be invoked by starting a message with a leading slash.
 #[derive(
@@ -20,6 +20,8 @@ pub enum SlashCommand {
     Bye,
     /// Show help
     Help,
+    /// Approve the next pending tool request
+    Approve,
 }
 
 pub fn command_entries() -> Vec<CommandEntry> {
@@ -70,11 +72,14 @@ impl SlashCommand {
     /// User-visible description shown in help.
     pub fn description(self) -> &'static str {
         match self {
-            SlashCommand::Mode => "switch to a different mode (brainstorm, plan, execute, document)",
+            SlashCommand::Mode => {
+                "switch to a different mode (brainstorm, plan, execute, document)"
+            }
             SlashCommand::Model => "switch to a different model",
             SlashCommand::Home => "return to the home screen",
             SlashCommand::Bye => "exit the application",
             SlashCommand::Help => "show available commands",
+            SlashCommand::Approve => "approve the next (or specified) pending tool",
         }
     }
 
@@ -86,16 +91,19 @@ impl SlashCommand {
     /// Whether this command can be run while streaming is active.
     pub fn available_during_streaming(self) -> bool {
         match self {
-            SlashCommand::Mode | SlashCommand::Model | SlashCommand::Home | SlashCommand::Bye | SlashCommand::Help => true,
+            SlashCommand::Mode
+            | SlashCommand::Model
+            | SlashCommand::Home
+            | SlashCommand::Bye
+            | SlashCommand::Help
+            | SlashCommand::Approve => true,
         }
     }
 }
 
 /// Return all built-in commands in a Vec paired with their command string.
 pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
-    SlashCommand::iter()
-        .map(|c| (c.command(), c))
-        .collect()
+    SlashCommand::iter().map(|c| (c.command(), c)).collect()
 }
 
 /// Parse a slash command from user input
@@ -108,13 +116,17 @@ pub fn parse_slash_command(input: &str) -> Option<ParsedCommand> {
     let head = parts.next()?;
     let rest: Vec<String> = parts.map(|s| s.to_string()).collect();
 
-    let command = SlashCommand::from_str(head).ok().or_else(|| match head.to_lowercase().as_str() {
-        "q" | "quit" | "exit" => Some(SlashCommand::Bye),
-        "h" | "home" => Some(SlashCommand::Home),
-        "m" | "switch" => Some(SlashCommand::Mode),
-        "models" => Some(SlashCommand::Model),
-        _ => None,
-    })?;
+    let command =
+        SlashCommand::from_str(head)
+            .ok()
+            .or_else(|| match head.to_lowercase().as_str() {
+                "q" | "quit" | "exit" => Some(SlashCommand::Bye),
+                "h" | "home" => Some(SlashCommand::Home),
+                "m" | "switch" => Some(SlashCommand::Mode),
+                "models" => Some(SlashCommand::Model),
+                "approve" | "ap" | "yes" => Some(SlashCommand::Approve),
+                _ => None,
+            })?;
 
     let argument = if rest.is_empty() {
         None
@@ -131,9 +143,11 @@ pub fn get_help_text() -> String {
     for (command_str, command) in built_in_slash_commands() {
         help.push_str(&format!("/{} - {}\n", command_str, command.description()));
     }
-    
+
     help.push_str("\nYou can also use aliases like /q for /bye, /h for /home, /m for /mode, /models for /model");
-    help.push_str("\nUse /mode <b|p|e|d> to jump directly to Brainstorm, Plan, Execute, or Document mode.");
+    help.push_str(
+        "\nUse /mode <b|p|e|d> to jump directly to Brainstorm, Plan, Execute, or Document mode.",
+    );
 
     help
 }

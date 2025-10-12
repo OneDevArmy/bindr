@@ -4,8 +4,8 @@
 ---
 
 ## 🧩 PROJECT OVERVIEW
-Bindr is a Rust-based multi-agent TUI/CLI framework designed for AI-assisted software creation.
-It orchestrates multiple LLM agents through “modes” (Brainstorm, Plan, Execute, Document) that will later evolve into autonomous, intent-driven workflows.
+Bindr is a Rust-based multi-agent, multi-model TUI/CLI framework designed for AI-assisted software creation.
+It orchestrates multiple LLM agents through internal “modes” (Brainstorm, Plan, Execute, Document) that will later evolve into autonomous, intent-driven workflows.
 
 The goal is to evolve Bindr into a **modular, production-grade, multi-model orchestration engine** with auto-mode inference, structured context persistence, and advanced error handling.
 

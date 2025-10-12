@@ -1,5 +1,5 @@
 use crate::events::BindrMode;
-use crate::ui::conversation::commands::{command_entries, CommandEntry, ParsedCommand};
+use crate::ui::conversation::commands::{CommandEntry, ParsedCommand, command_entries};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -23,8 +23,6 @@ pub enum ConversationResult {
 pub struct TextAreaState {
     pub content: String,
     pub cursor_position: usize,
-    #[allow(dead_code)]
-    pub scroll_offset: usize,
 }
 
 impl Default for TextAreaState {
@@ -32,7 +30,6 @@ impl Default for TextAreaState {
         Self {
             content: String::new(),
             cursor_position: 0,
-            scroll_offset: 0,
         }
     }
 }
@@ -86,7 +83,9 @@ impl ConversationComposer {
                     state.cursor_position = 0;
                     self.close_command_palette();
                     drop(state);
-                    if let Some(command) = crate::ui::conversation::commands::parse_slash_command(&content) {
+                    if let Some(command) =
+                        crate::ui::conversation::commands::parse_slash_command(&content)
+                    {
                         return ConversationResult::Command(command);
                     } else {
                         return ConversationResult::Submitted(content);
@@ -287,32 +286,12 @@ impl ConversationComposer {
     pub fn set_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
     }
-
-    /// Update current mode
-    #[allow(dead_code)]
-    pub fn update_mode(&mut self, mode: BindrMode) {
-        self.current_mode = mode;
-    }
-
-    /// Get current content
-    #[allow(dead_code)]
-    pub fn get_content(&self) -> String {
-        self.state.borrow().content.clone()
-    }
-
-    /// Clear content
-    #[allow(dead_code)]
-    pub fn clear(&self) {
-        let mut state = self.state.borrow_mut();
-        state.content.clear();
-        state.cursor_position = 0;
-    }
 }
 
 impl Widget for ConversationComposer {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let state = self.state.borrow();
-        
+
         // Create the input block
         let block = Block::default()
             .borders(Borders::ALL)
@@ -328,13 +307,16 @@ impl Widget for ConversationComposer {
 
         // Render content or placeholder
         if state.content.is_empty() {
-            let placeholder_line = Line::from(vec![
-                Span::styled(
-                    &self.placeholder,
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            buf.set_line(inner_area.x, inner_area.y, &placeholder_line, inner_area.width);
+            let placeholder_line = Line::from(vec![Span::styled(
+                &self.placeholder,
+                Style::default().fg(Color::DarkGray),
+            )]);
+            buf.set_line(
+                inner_area.x,
+                inner_area.y,
+                &placeholder_line,
+                inner_area.width,
+            );
         } else {
             // Render content with cursor indicator
             let mut content = state.content.clone();
@@ -345,7 +327,12 @@ impl Widget for ConversationComposer {
             for (i, line_text) in content.split('\n').enumerate() {
                 if i < inner_area.height as usize {
                     let line = Line::from(vec![Span::raw(line_text)]);
-                    buf.set_line(inner_area.x, inner_area.y + i as u16, &line, inner_area.width);
+                    buf.set_line(
+                        inner_area.x,
+                        inner_area.y + i as u16,
+                        &line,
+                        inner_area.width,
+                    );
                 }
             }
         }
@@ -376,7 +363,10 @@ impl Widget for ConversationComposer {
 
                 let is_selected = selected == Some(index);
                 let style = if is_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };

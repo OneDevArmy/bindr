@@ -1,46 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use ratatui::text::Line;
-
-/// Internal application events for coordinating between components
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum AppEvent {
-    /// Start a new brainstorming session
-    StartBrainstorm { initial_prompt: Option<String> },
-    /// Switch to a different mode (brainstorm, plan, execute, document)
-    SwitchMode { mode: BindrMode },
-    /// Create a new project
-    CreateProject { name: String, path: PathBuf },
-    /// Open an existing project
-    OpenProject { name: String },
-    /// Save current session state
-    SaveSession,
-    /// Load session from file
-    LoadSession { path: PathBuf },
-    /// Update API key configuration
-    UpdateApiKey { key: String },
-    /// LLM response received
-    LlmResponse { content: String, mode: BindrMode },
-    /// LLM streaming event
-    LlmStreamEvent { event: LlmStreamEvent },
-    /// User input for conversation
-    UserInput { message: String },
-    /// Agent mode transition
-    AgentModeTransition { from: BindrMode, to: BindrMode },
-    /// Conversation line to display
-    ConversationLine { line: Line<'static> },
-    /// Streaming started
-    StreamingStarted,
-    /// Streaming completed
-    StreamingCompleted,
-    /// Request to exit the application
-    ExitRequest,
-    /// Show error message
-    ShowError { message: String },
-    /// Show info message
-    ShowInfo { message: String },
-}
 
 /// LLM streaming events
 #[derive(Debug, Clone)]
@@ -56,7 +15,6 @@ pub enum LlmStreamEvent {
     /// Error occurred
     Error(String),
 }
-
 
 /// Bindr workflow modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,26 +36,6 @@ impl BindrMode {
             BindrMode::Plan => "Plan",
             BindrMode::Execute => "Execute",
             BindrMode::Document => "Document",
-        }
-    }
-    
-    #[allow(dead_code)]
-    pub fn description(&self) -> &'static str {
-        match self {
-            BindrMode::Brainstorm => "Explore ideas and define your project",
-            BindrMode::Plan => "Structure your project and create roadmap",
-            BindrMode::Execute => "Implement your project based on the plan",
-            BindrMode::Document => "Document what was built and create changelog",
-        }
-    }
-    
-    #[allow(dead_code)]
-    pub fn next_mode(&self) -> Option<BindrMode> {
-        match self {
-            BindrMode::Brainstorm => Some(BindrMode::Plan),
-            BindrMode::Plan => Some(BindrMode::Execute),
-            BindrMode::Execute => Some(BindrMode::Document),
-            BindrMode::Document => None,
         }
     }
 }

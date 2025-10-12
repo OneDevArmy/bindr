@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 
 mod agent;
+mod agents;
 mod config;
 mod core;
 mod events;

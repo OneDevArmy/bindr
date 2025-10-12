@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod dispatcher;
+pub mod executor;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 use crate::events::BindrMode;
 pub use capabilities::ToolKind;
 pub use dispatcher::ToolDispatcher;
+pub use executor::{ToolExecutionResult, ToolExecutor};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInvocation {
@@ -41,6 +43,7 @@ pub enum BindrTool {
     RunCommand(CommandOptions),
     ListModels,
     SelectModel(ModelSelection),
+    WebSearch(WebSearchOptions),
 }
 
 impl BindrTool {
@@ -54,6 +57,7 @@ impl BindrTool {
             BindrTool::RunCommand(_) => ToolKind::RunCommand,
             BindrTool::ListModels => ToolKind::ListModels,
             BindrTool::SelectModel(_) => ToolKind::SelectModel,
+            BindrTool::WebSearch(_) => ToolKind::WebSearch,
         }
     }
 }
@@ -103,4 +107,10 @@ pub struct CommandOptions {
 pub struct ModelSelection {
     pub provider_id: String,
     pub model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchOptions {
+    pub query: String,
+    pub max_results: Option<u8>,
 }

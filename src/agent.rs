@@ -1,422 +1,73 @@
+use std::sync::Arc;
+
 use crate::config::Config;
-use crate::events::{BindrMode, ConversationRole, ConversationEntry, ProjectState};
-use crate::llm::{LlmClient, LlmRequest, LlmMessage, LlmEvent};
-use crate::prompts;
+use crate::core::agent_runtime::AgentRuntime;
+use crate::core::intent::IntentDecision;
+use crate::core::kernel::KernelEvent;
+use crate::events::BindrMode;
+use crate::llm::LlmEvent;
 use crate::session::SessionManager;
-use crate::tools::{ToolDispatcher, ToolInvocation, ToolRequestOutcome};
+use crate::tools::{ToolInvocation, ToolRequestOutcome};
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
 
-/// Agent orchestrator that manages different modes and their interactions
-#[derive(Clone)]
-pub struct AgentOrchestrator {
-    #[allow(dead_code)]
-    config: Config,
-    llm_client: LlmClient,
-    #[allow(dead_code)]
-    session_manager: SessionManager,
-    current_mode: BindrMode,
-    conversation_history: Vec<ConversationEntry>,
-    current_provider: String,
-    current_model: String,
-}
-
-impl AgentOrchestrator {
-    pub fn new(config: Config, session_manager: SessionManager) -> Self {
-        let llm_client = LlmClient::new(config.clone());
-        
-        let current_provider = config.selected_provider.clone();
-        let current_model = config.default_model.clone();
-
-        Self {
-            config,
-            llm_client,
-            session_manager,
-            current_mode: BindrMode::Brainstorm,
-            conversation_history: Vec::new(),
-            current_provider,
-            current_model,
-        }
-    }
-
-    /// Start a new conversation in the current mode
-    #[allow(dead_code)]
-    pub async fn start_conversation(
-        &mut self,
-        initial_prompt: Option<String>,
-    ) -> Result<mpsc::Receiver<LlmEvent>> {
-        let mut messages = vec![LlmMessage {
-            role: "system".to_string(),
-            content: self.get_system_prompt(),
-        }];
-
-        if let Some(prompt) = initial_prompt {
-            messages.push(LlmMessage {
-                role: "user".to_string(),
-                content: prompt,
-            });
-        }
-
-        let request = LlmRequest::new(messages, self.current_mode)
-            .with_max_tokens(16000);
-        self.llm_client.stream_response(request).await
-    }
-
-    /// Continue the conversation with a new user message
-    pub async fn continue_conversation(
-        &mut self,
-        user_message: String,
-    ) -> Result<mpsc::UnboundedReceiver<String>> {
-        // Add user message to history
-        self.add_to_history(ConversationRole::User, user_message.clone());
-
-        // Build conversation context
-        let mut messages = vec![LlmMessage {
-            role: "system".to_string(),
-            content: self.get_system_prompt_for_mode(self.current_mode),
-        }];
-
-        // Add conversation history
-        for entry in &self.conversation_history {
-            messages.push(LlmMessage {
-                role: entry.role.to_string(),
-                content: entry.content.clone(),
-            });
-        }
-
-        // Add current user message
-        messages.push(LlmMessage {
-            role: "user".to_string(),
-            content: user_message,
-        });
-
-        let provider_id = if self.current_provider.is_empty() {
-            self.config.selected_provider.clone()
-        } else {
-            self.current_provider.clone()
-        };
-        let model_id = if self.current_model.is_empty() {
-            self.config.default_model.clone()
-        } else {
-            self.current_model.clone()
-        };
-
-        let request = LlmRequest::new(messages, self.current_mode)
-            .with_temperature(0.4)
-            .with_max_tokens(2000)
-            .with_provider(provider_id.clone())
-            .with_model(model_id.clone());
-        let mut llm_rx = self.llm_client.stream_response(request).await?;
-        
-        // Convert LLM events to simple string chunks
-        let (tx, rx) = mpsc::unbounded_channel();
-        
-        tokio::spawn(async move {
-            while let Some(event) = llm_rx.recv().await {
-                match event {
-                    LlmEvent::TextDelta(chunk) => {
-                        let _ = tx.send(chunk);
-                    }
-                    LlmEvent::ResponseComplete(_content) => {
-                        // We've already forwarded incremental chunks; no need to resend the full text
-                    }
-                    LlmEvent::ReasoningDelta(_reasoning) => {
-                        // Optionally forward reasoning content; currently ignored to avoid UX clutter
-                    }
-                    LlmEvent::StreamComplete => {
-                        break;
-                    }
-                    LlmEvent::Error(error) => {
-                        let _ = tx.send(format!("Error: {}", error));
-                        break;
-                    }
-                }
-            }
-        });
-        
-        // Store last selections for subsequent requests
-        self.current_provider = provider_id;
-        self.current_model = model_id;
-        
-        Ok(rx)
-    }
-
-    /// Switch to a different mode
-    pub async fn switch_mode(&mut self, new_mode: BindrMode) -> Result<()> {
-        if new_mode == self.current_mode {
-            return Ok(());
-        }
-
-        // Save current conversation state
-        self.save_conversation_state().await?;
-
-        // Switch mode
-        self.current_mode = new_mode;
-
-        // Load conversation state for new mode
-        self.load_conversation_state().await?;
-
-        Ok(())
-    }
-
-    /// Get the current mode
-    #[allow(dead_code)]
-    pub fn current_mode(&self) -> BindrMode {
-        self.current_mode
-    }
-
-    /// Get conversation history
-    #[allow(dead_code)]
-    pub fn conversation_history(&self) -> &[ConversationEntry] {
-        &self.conversation_history
-    }
-
-    /// Add an entry to conversation history
-    pub fn add_to_history(&mut self, role: ConversationRole, content: String) {
-        self.conversation_history.push(ConversationEntry {
-            mode: self.current_mode,
-            role,
-            content,
-            timestamp: chrono::Utc::now(),
-        });
-    }
-
-    /// Update orchestrator configuration and refresh LLM client
-    pub fn update_config(&mut self, config: Config) {
-        self.llm_client = LlmClient::new(config.clone());
-        self.current_provider = config.selected_provider.clone();
-        self.current_model = config.default_model.clone();
-        self.config = config;
-    }
-
-    /// Review a tool invocation against the current mode's capabilities
-    pub fn review_tool_invocation(&self, invocation: ToolInvocation) -> Result<ToolRequestOutcome> {
-        ToolDispatcher::review(self.current_mode, invocation)
-    }
-
-    /// Get system prompt for current mode
-    fn get_system_prompt(&self) -> String {
-        self.build_system_prompt(self.current_mode)
-    }
-
-    /// Get context from previous modes
-    fn get_mode_context(&self) -> String {
-        let mut context_parts = Vec::new();
-
-        // Add brainstorm context
-        if let Some(brainstorm_context) = self.get_brainstorm_context() {
-            context_parts.push(format!("Brainstorming: {}", brainstorm_context));
-        }
-
-        // Add plan context
-        if let Some(plan_context) = self.get_plan_context() {
-            context_parts.push(format!("Planning: {}", plan_context));
-        }
-
-        // Add execution context
-        if let Some(exec_context) = self.get_execution_context() {
-            context_parts.push(format!("Implementation: {}", exec_context));
-        }
-
-        context_parts.join("\n")
-    }
-
-    /// Get brainstorm context summary
-    fn get_brainstorm_context(&self) -> Option<String> {
-        // Look for brainstorm entries in conversation history
-        let brainstorm_entries: Vec<_> = self.conversation_history
-            .iter()
-            .filter(|entry| matches!(entry.role, ConversationRole::Assistant))
-            .collect();
-
-        if brainstorm_entries.is_empty() {
-            return None;
-        }
-
-        // Create a summary of key brainstorm points
-        let summary = brainstorm_entries
-            .iter()
-            .map(|entry| entry.content.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Truncate if too long
-        if summary.len() > 500 {
-            Some(format!("{}...", &summary[..500]))
-        } else {
-            Some(summary)
-        }
-    }
-
-    /// Get plan context summary
-    fn get_plan_context(&self) -> Option<String> {
-        // This would typically come from a saved plan file
-        // For now, return None as we haven't implemented plan persistence yet
-        None
-    }
-
-    /// Get execution context summary
-    fn get_execution_context(&self) -> Option<String> {
-        // This would typically come from execution logs
-        // For now, return None as we haven't implemented execution tracking yet
-        None
-    }
-
-    /// Save conversation state for current mode
-    async fn save_conversation_state(&mut self) -> Result<()> {
-        // This would save the conversation to the appropriate mode file
-        // For now, we'll just keep it in memory
-        Ok(())
-    }
-
-    /// Load conversation state for current mode
-    async fn load_conversation_state(&mut self) -> Result<()> {
-        // This would load the conversation from the appropriate mode file
-        // For now, we'll just keep it in memory
-        Ok(())
-    }
-
-    /// Process a complete response and add it to history
-    pub fn process_complete_response(&mut self, response: String) {
-        self.add_to_history(ConversationRole::Assistant, response);
-    }
-
-    /// Get project state summary
-    #[allow(dead_code)]
-    pub fn get_project_state(&self) -> ProjectState {
-        ProjectState {
-            name: "current".to_string(),
-            path: std::path::PathBuf::new(),
-            current_mode: self.current_mode,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_modified: chrono::Utc::now().to_rfc3339(),
-            bindr_md_content: String::new(),
-            conversation_history: self.conversation_history.clone(),
-            conversation_count: self.conversation_history.len(),
-            last_activity: chrono::Utc::now(),
-        }
-    }
-
-    /// Check if we should suggest mode transition
-    #[allow(dead_code)]
-    pub fn should_suggest_transition(&self) -> Option<BindrMode> {
-        match self.current_mode {
-            BindrMode::Brainstorm => {
-                // Suggest moving to Plan if we have a good concept
-                if self.conversation_history.len() >= 3 {
-                    Some(BindrMode::Plan)
-                } else {
-                    None
-                }
-            }
-            BindrMode::Plan => {
-                // Suggest moving to Execute if we have a complete plan
-                if self.conversation_history.len() >= 2 {
-                    Some(BindrMode::Execute)
-                } else {
-                    None
-                }
-            }
-            BindrMode::Execute => {
-                // Suggest moving to Document if we have implementation
-                if self.conversation_history.len() >= 1 {
-                    Some(BindrMode::Document)
-                } else {
-                    None
-                }
-            }
-            BindrMode::Document => {
-                // Document mode is terminal, no automatic transition
-                None
-            }
-        }
-    }
-
-    /// Get system prompt for a specific mode
-    fn get_system_prompt_for_mode(&self, mode: BindrMode) -> String {
-        self.build_system_prompt(mode)
-    }
-
-    fn build_system_prompt(&self, mode: BindrMode) -> String {
-        let mut prompt = prompts::mode_prompt(mode).to_string();
-
-        let context = self.get_mode_context();
-        if !context.is_empty() {
-            prompt.push_str("\n\nContext from previous work:\n");
-            prompt.push_str(&context);
-        }
-
-        prompt
-    }
-
-    /// Get transition suggestion message
-    #[allow(dead_code)]
-    pub fn get_transition_suggestion(&self) -> Option<String> {
-        if let Some(next_mode) = self.should_suggest_transition() {
-            match next_mode {
-                BindrMode::Plan => Some("Ready to create a detailed plan? Press 'P' to switch to Planning mode.".to_string()),
-                BindrMode::Execute => Some("Ready to start implementation? Press 'E' to switch to Execution mode.".to_string()),
-                BindrMode::Document => Some("Ready to document your work? Press 'D' to switch to Documentation mode.".to_string()),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    }
-}
-
-/// Agent manager that coordinates multiple agents
+/// Facade over the agent runtime that exposes high-level orchestration operations to the UI.
 #[derive(Clone)]
 pub struct AgentManager {
-    orchestrator: AgentOrchestrator,
-    #[allow(dead_code)]
-    is_active: bool,
+    runtime: Arc<AgentRuntime>,
 }
 
 impl AgentManager {
-    pub fn new(config: Config, session_manager: SessionManager) -> Self {
-        Self {
-            orchestrator: AgentOrchestrator::new(config, session_manager),
-            is_active: false,
-        }
+    pub async fn new(config: Config, session_manager: SessionManager) -> Result<Self> {
+        let runtime = AgentRuntime::new(config, session_manager).await?;
+        Ok(Self {
+            runtime: Arc::new(runtime),
+        })
     }
 
-    /// Start the agent manager
-    #[allow(dead_code)]
-    pub fn start(&mut self) {
-        self.is_active = true;
+    pub async fn config(&self) -> Config {
+        self.runtime.config().await
     }
 
-    /// Stop the agent manager
-    #[allow(dead_code)]
-    pub fn stop(&mut self) {
-        self.is_active = false;
+    pub async fn current_selection(&self) -> (String, String) {
+        self.runtime.current_selection().await
     }
 
-    /// Check if the agent manager is active
-    #[allow(dead_code)]
-    pub fn is_active(&self) -> bool {
-        self.is_active
+    pub async fn apply_model_decision(&self, provider_id: String, model_id: String) {
+        self.runtime
+            .apply_model_decision(provider_id, model_id)
+            .await;
     }
 
-    /// Get a mutable reference to the orchestrator
-    pub fn orchestrator_mut(&mut self) -> &mut AgentOrchestrator {
-        &mut self.orchestrator
+    pub async fn switch_mode(&self, new_mode: BindrMode) -> Result<()> {
+        self.runtime.switch_mode(new_mode).await
     }
 
-    /// Get a reference to the orchestrator
-    #[allow(dead_code)]
-    pub fn orchestrator(&self) -> &AgentOrchestrator {
-        &self.orchestrator
+    pub async fn continue_conversation(
+        &self,
+        decision: IntentDecision,
+        user_input: String,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>> {
+        self.runtime.dispatch_intent(decision, user_input).await
     }
 
-    /// Refresh agent configuration
-    pub fn update_config(&mut self, config: Config) {
-        self.orchestrator.update_config(config);
+    pub async fn update_config(&self, config: Config) {
+        self.runtime.update_config(config).await;
     }
 
-    /// Validate a tool invocation for the active mode
-    pub fn review_tool_invocation(&self, invocation: ToolInvocation) -> Result<ToolRequestOutcome> {
-        self.orchestrator.review_tool_invocation(invocation)
+    pub async fn review_tool_invocation(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<ToolRequestOutcome> {
+        self.runtime.review_tool_invocation(invocation).await
+    }
+
+    pub async fn subscribe_events(&self) -> broadcast::Receiver<KernelEvent> {
+        self.runtime.subscribe_events().await
+    }
+
+    pub async fn approve_pending_tool(&self, tool_id: Uuid) -> Result<()> {
+        self.runtime.approve_pending_tool(tool_id).await
     }
 }

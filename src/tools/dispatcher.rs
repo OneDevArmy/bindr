@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use crate::events::BindrMode;
 
-use super::capabilities::{ModeCapabilities, MODE_CAPABILITIES};
+use super::capabilities::{MODE_CAPABILITIES, ModeCapabilities};
 use super::{ToolInvocation, ToolRequestOutcome};
 
 /// Validates and routes tool invocations according to the active mode's capabilities.

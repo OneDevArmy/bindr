@@ -1,1 +1,6 @@
 /target
+
+AGENTS.md
+.DS_Store
+Cargo.lock
+PROMPT.md

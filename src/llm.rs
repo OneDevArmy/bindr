@@ -4,8 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::StatusCode;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -15,8 +15,6 @@ use tracing::{debug, error, info, trace, warn};
 
 const MAX_RETRIES: usize = 3;
 const RETRY_BACKOFF_BASE_MS: u64 = 500;
-use tokio::time::Duration;
-use tracing::{debug, error, info, trace};
 
 /// Events emitted during LLM streaming
 #[derive(Debug, Clone)]
@@ -33,11 +31,10 @@ pub enum LlmEvent {
     Error(String),
 }
 
-/// Request to send to LLM
+/// Request to send to an LLM provider
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
     pub messages: Vec<LlmMessage>,
-    #[allow(dead_code)]
     pub mode: BindrMode,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
@@ -45,7 +42,7 @@ pub struct LlmRequest {
     pub model_id: Option<String>,
 }
 
-/// Message in conversation
+/// Message in a conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmMessage {
     pub role: String,
@@ -64,8 +61,6 @@ pub enum LlmError {
     Serialization(#[from] serde_json::Error),
     #[error("unexpected response format: {0}")]
     UnexpectedFormat(String),
-    #[error("{0}")]
-    Other(String),
 }
 
 #[derive(Clone)]
@@ -88,7 +83,7 @@ pub trait ModelProvider: Send + Sync {
     ) -> std::result::Result<(), LlmError>;
 }
 
-/// LLM client for streaming responses
+/// Client responsible for dispatching streaming LLM requests
 #[derive(Clone)]
 pub struct LlmClient {
     config: Config,
@@ -97,22 +92,20 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    /// Create a new LLM client using the provided configuration.
     pub fn new(config: Config) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .expect("Failed to create HTTP client");
 
-        let providers: HashMap<String, Arc<dyn ModelProvider>> = vec![
-            Arc::new(OpenAiProvider) as Arc<dyn ModelProvider>,
-            Arc::new(AnthropicProvider) as Arc<dyn ModelProvider>,
-            Arc::new(GoogleProvider) as Arc<dyn ModelProvider>,
-            Arc::new(XaiProvider) as Arc<dyn ModelProvider>,
-            Arc::new(OpenRouterProvider) as Arc<dyn ModelProvider>,
-        ]
-        .into_iter()
-        .map(|provider| (provider.id().to_string(), provider))
-        .collect();
+        let mut providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::new();
+        providers.insert("openai".to_string(), Arc::new(OpenAiProvider));
+        providers.insert("anthropic".to_string(), Arc::new(AnthropicProvider));
+        providers.insert("google".to_string(), Arc::new(GoogleProvider));
+        providers.insert("xai".to_string(), Arc::new(XaiProvider));
+        providers.insert("openrouter".to_string(), Arc::new(OpenRouterProvider));
+        providers.insert("mistral".to_string(), Arc::new(MistralProvider));
 
         Self {
             config,
@@ -121,19 +114,14 @@ impl LlmClient {
         }
     }
 
-    /// Stream a response from the configured LLM provider
+    /// Stream a response from the selected LLM provider.
     pub async fn stream_response(
         &self,
         mut request: LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>> {
         let (tx, rx) = mpsc::channel(1000);
 
-    /// Stream a response from the configured LLM provider
-    pub async fn stream_response(&self, request: LlmRequest) -> Result<mpsc::Receiver<LlmEvent>> {
-        let (tx, rx) = mpsc::channel(1000);
-
-        // Check if we have an API key configured
-        if !self.config.has_api_key() {
+        if self.config.get_api_key().is_none() {
             error!(event = "llm_request_failed", reason = "missing_api_key");
             let _ = tx
                 .send(LlmEvent::Error(
@@ -154,68 +142,60 @@ impl LlmClient {
             .model_providers
             .get(&provider_key)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No provider configured for id {}", provider_id))?;
-
-        let provider_impl =
-            self.providers.get(&provider_key).cloned().ok_or_else(|| {
-                anyhow::anyhow!("No runtime support for provider {}", provider_id)
+            .ok_or_else(|| {
+                LlmError::Configuration(format!("No provider configured for id {provider_id}"))
             })?;
 
-        let api_key = self
-            .config
-            .get_api_key_for(&provider_key)
+        let provider_impl = self.providers.get(&provider_key).cloned().ok_or_else(|| {
+            LlmError::Configuration(format!("No runtime support for provider {provider_id}"))
+        })?;
 
-        let provider = self
-            .config
-            .model_providers
-            .get(&provider_id)
-            .ok_or_else(|| anyhow::anyhow!("No provider configured for id {}", provider_id))?
-            .clone();
-
-        let api_key = self
-            .config
-            .get_api_key_for(&provider_id)
-            .ok_or_else(|| anyhow::anyhow!("No API key configured for provider {}", provider_id))?;
+        let api_key = self.config.get_api_key_for(&provider_key).ok_or_else(|| {
+            LlmError::Configuration(format!("No API key configured for provider {provider_id}"))
+        })?;
 
         let model = request
             .model_id
-            .take()
             .clone()
             .unwrap_or_else(|| self.config.default_model.clone());
+        if request.model_id.is_none() {
+            request.model_id = Some(model.clone());
+        }
 
         let message_count = request.messages.len();
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-        let mode = request.mode;
+        let mode_label = request.mode.display_name();
         let provider_name = provider_config.name.clone();
-        let provider_name = provider.name.clone();
 
         info!(
             event = "llm_api_call",
             provider = provider_name.as_str(),
             provider_id = provider_key.as_str(),
-            provider_id = provider_id.as_str(),
             model = model.as_str(),
-            mode = mode.display_name(),
+            mode = mode_label,
             message_count,
             temperature,
             max_tokens,
             "dispatching streaming request"
         );
 
-        // Spawn streaming task
-        let client = self.client.clone();
+        let ctx = ProviderContext {
+            client: self.client.clone(),
+            config: provider_config,
+            model: model.clone(),
+            api_key,
+            request,
+        };
 
-        let tx_clone = tx.clone();
+        let provider_task = provider_impl.clone();
+        let tx_task = tx.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = dispatch_with_retry(provider_for_task, ctx, tx_clone).await {
+            if let Err(err) = dispatch_with_retry(provider_task, ctx, tx_task.clone()).await {
                 error!(event = "llm_stream_error", error = %err);
-            if let Err(e) =
-                Self::stream_from_provider(client, provider, model, api_key, request, tx).await
-            {
-                error!(event = "llm_stream_error", error = %e);
-                let _ = tx_clone.send(LlmEvent::Error(e.to_string())).await;
+                let _ = tx_task.send(LlmEvent::Error(err.to_string())).await;
+                let _ = tx_task.send(LlmEvent::StreamComplete).await;
             }
         });
 
@@ -236,9 +216,7 @@ async fn dispatch_with_retry(
         let ctx_attempt = ctx.clone();
 
         match provider.stream(ctx_attempt, tx_attempt.clone()).await {
-            Ok(()) => {
-                return Ok(());
-            }
+            Ok(()) => return Ok(()),
             Err(err) if attempt < MAX_RETRIES => {
                 warn!(
                     event = "llm_stream_retry",
@@ -258,38 +236,17 @@ async fn dispatch_with_retry(
                     error = %err,
                     "LLM streaming failed after retries"
                 );
-                let _ = tx.send(LlmEvent::Error(err.to_string())).await;
-                let _ = tx.send(LlmEvent::StreamComplete).await;
+                let _ = tx.clone().send(LlmEvent::Error(err.to_string())).await;
+                let _ = tx.clone().send(LlmEvent::StreamComplete).await;
                 return Err(err);
             }
-    /// Stream from specific provider
-    async fn stream_from_provider(
-        client: reqwest::Client,
-        provider: ModelProvider,
-        model: String,
-        api_key: String,
-        request: LlmRequest,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> Result<()> {
-        match provider.name.to_lowercase().as_str() {
-            "openai" => Self::stream_openai(client, provider, model, api_key, request, tx).await,
-            "anthropic" => {
-                Self::stream_anthropic(client, provider, model, api_key, request, tx).await
-            }
-            "google" => Self::stream_google(client, provider, model, api_key, request, tx).await,
-            "xai" => Self::stream_xai(client, provider, model, api_key, request, tx).await,
-            "openrouter" => {
-                Self::stream_openrouter(client, provider, model, api_key, request, tx).await
-            }
-            "mistral" => Self::stream_mistral(client, provider, model, api_key, request, tx).await,
-            _ => Err(anyhow::anyhow!("Unsupported provider: {}", provider.name)),
         }
     }
 }
 
 fn retry_delay(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1) as u32;
-    let factor = 1u64.saturating_shl(exponent);
+    let factor = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
     let delay = RETRY_BACKOFF_BASE_MS.saturating_mul(factor).min(30_000);
     Duration::from_millis(delay)
 }
@@ -318,10 +275,8 @@ impl ModelProvider for OpenAiProvider {
         let url = join_url(&config.base_url, "chat/completions");
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-    ) -> Result<()> {
-        let url = format!("{}/v1/chat/completions", provider.base_url);
 
-        let payload = serde_json::json!({
+        let payload = json!({
             "model": model,
             "messages": request.messages,
             "stream": true,
@@ -331,9 +286,9 @@ impl ModelProvider for OpenAiProvider {
 
         info!(
             event = "llm_http_request",
-            provider = self.id(),
-            provider = provider.name.as_str(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            model = payload["model"].as_str().unwrap_or_default(),
             url = %url,
             "sending OpenAI streaming request"
         );
@@ -350,8 +305,8 @@ impl ModelProvider for OpenAiProvider {
 
         debug!(
             event = "llm_http_response",
-            provider = self.id(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             status = %response.status(),
             "OpenAI response accepted"
         );
@@ -366,27 +321,6 @@ struct AnthropicProvider;
 impl ModelProvider for AnthropicProvider {
     fn id(&self) -> &'static str {
         "anthropic"
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "OpenAI API returned error"
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenAI API error: {}", error_text));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "OpenAI response accepted"
-        );
-
-        Self::process_sse_stream(response, tx).await
     }
 
     async fn stream(
@@ -403,12 +337,7 @@ impl ModelProvider for AnthropicProvider {
         } = ctx;
 
         let url = join_url(&config.base_url, "v1/messages");
-        let mut messages = Vec::new();
-        let mut system = String::new();
-    ) -> Result<()> {
-        let url = format!("{}/v1/messages", provider.base_url);
 
-        // Convert messages to Anthropic format
         let mut messages = Vec::new();
         let mut system = String::new();
 
@@ -416,29 +345,33 @@ impl ModelProvider for AnthropicProvider {
             if msg.role == "system" {
                 system = msg.content;
             } else {
-                messages.push(serde_json::json!({
+                messages.push(json!({
                     "role": msg.role,
-                    "content": msg.content
+                    "content": [{"type": "text", "text": msg.content}]
                 }));
             }
         }
 
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-        let payload = serde_json::json!({
+
+        let mut payload = json!({
             "model": model,
             "messages": messages,
-            "system": system,
             "stream": true,
             "temperature": temperature,
             "max_tokens": max_tokens
         });
 
+        if !system.is_empty() {
+            payload["system"] = Value::String(system);
+        }
+
         info!(
             event = "llm_http_request",
-            provider = self.id(),
-            provider = provider.name.as_str(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            model = payload["model"].as_str().unwrap_or_default(),
             url = %url,
             "sending Anthropic streaming request"
         );
@@ -456,34 +389,13 @@ impl ModelProvider for AnthropicProvider {
 
         debug!(
             event = "llm_http_response",
-            provider = self.id(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             status = %response.status(),
             "Anthropic response accepted"
         );
 
         process_anthropic_stream(response, tx).await
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "Anthropic API returned error"
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Anthropic API error: {}", error_text));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "Anthropic response accepted"
-        );
-
-        Self::process_anthropic_stream(response, tx).await
     }
 }
 
@@ -510,17 +422,10 @@ impl ModelProvider for GoogleProvider {
 
         let base = config.base_url.trim_end_matches('/');
         let url = format!(
-            "{}/models/{}:streamGenerateContent?key={}",
-            base, model, api_key
+            "{base}/models/{}:streamGenerateContent?key={api_key}",
+            model
         );
 
-    ) -> Result<()> {
-        let url = format!(
-            "{}/models/{}:streamGenerateContent?key={}",
-            provider.base_url, model, api_key
-        );
-
-        // Convert messages to Gemini format
         let mut contents = Vec::new();
         let mut system_instruction = String::new();
 
@@ -528,7 +433,7 @@ impl ModelProvider for GoogleProvider {
             if msg.role == "system" {
                 system_instruction = msg.content;
             } else {
-                contents.push(serde_json::json!({
+                contents.push(json!({
                     "role": msg.role,
                     "parts": [{"text": msg.content}]
                 }));
@@ -537,7 +442,7 @@ impl ModelProvider for GoogleProvider {
 
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-        let mut payload = serde_json::json!({
+        let mut payload = json!({
             "contents": contents,
             "generationConfig": {
                 "temperature": temperature,
@@ -546,15 +451,15 @@ impl ModelProvider for GoogleProvider {
         });
 
         if !system_instruction.is_empty() {
-            payload["systemInstruction"] = serde_json::json!({
+            payload["systemInstruction"] = json!({
                 "parts": [{"text": system_instruction}]
             });
         }
 
         info!(
             event = "llm_http_request",
-            provider = self.id(),
-            provider = provider.name.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             model = model.as_str(),
             url = %url,
             "sending Google Gemini streaming request"
@@ -571,34 +476,13 @@ impl ModelProvider for GoogleProvider {
 
         debug!(
             event = "llm_http_response",
-            provider = self.id(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             status = %response.status(),
             "Google Gemini response accepted"
         );
 
         process_google_stream(response, tx).await
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "Google Gemini API returned error"
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Google API error: {}", error_text));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "Google Gemini response accepted"
-        );
-
-        Self::process_google_stream(response, tx).await
     }
 }
 
@@ -626,10 +510,8 @@ impl ModelProvider for XaiProvider {
         let url = join_url(&config.base_url, "v1/chat/completions");
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-    ) -> Result<()> {
-        let url = format!("{}/v1/chat/completions", provider.base_url);
 
-        let payload = serde_json::json!({
+        let payload = json!({
             "model": model,
             "messages": request.messages,
             "stream": true,
@@ -639,9 +521,9 @@ impl ModelProvider for XaiProvider {
 
         info!(
             event = "llm_http_request",
-            provider = self.id(),
-            provider = provider.name.as_str(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            model = payload["model"].as_str().unwrap_or_default(),
             url = %url,
             "sending xAI streaming request"
         );
@@ -658,8 +540,8 @@ impl ModelProvider for XaiProvider {
 
         debug!(
             event = "llm_http_response",
-            provider = self.id(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             status = %response.status(),
             "xAI response accepted"
         );
@@ -674,27 +556,6 @@ struct OpenRouterProvider;
 impl ModelProvider for OpenRouterProvider {
     fn id(&self) -> &'static str {
         "openrouter"
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "xAI API returned error"
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("xAI API error: {}", error_text));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "xAI response accepted"
-        );
-
-        Self::process_sse_stream(response, tx).await
     }
 
     async fn stream(
@@ -713,10 +574,8 @@ impl ModelProvider for OpenRouterProvider {
         let url = join_url(&config.base_url, "v1/chat/completions");
         let temperature = request.temperature.unwrap_or(0.7);
         let max_tokens = request.max_tokens.unwrap_or(4000);
-    ) -> Result<()> {
-        let url = format!("{}/v1/chat/completions", provider.base_url);
 
-        let payload = serde_json::json!({
+        let payload = json!({
             "model": model,
             "messages": request.messages,
             "stream": true,
@@ -726,9 +585,9 @@ impl ModelProvider for OpenRouterProvider {
 
         info!(
             event = "llm_http_request",
-            provider = self.id(),
-            provider = provider.name.as_str(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            model = payload["model"].as_str().unwrap_or_default(),
             url = %url,
             "sending OpenRouter streaming request"
         );
@@ -737,7 +596,7 @@ impl ModelProvider for OpenRouterProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://bindr.dev")
+            .header("HTTP-Referer", "https://bindrcli.com")
             .header("X-Title", "Bindr")
             .json(&payload)
             .send()
@@ -747,14 +606,84 @@ impl ModelProvider for OpenRouterProvider {
 
         debug!(
             event = "llm_http_response",
-            provider = self.id(),
-            model = model.as_str(),
+            provider = config.name.as_str(),
+            provider_id = self.id(),
             status = %response.status(),
             "OpenRouter response accepted"
         );
 
         process_sse_stream(response, tx).await
     }
+}
+
+struct MistralProvider;
+
+#[async_trait]
+impl ModelProvider for MistralProvider {
+    fn id(&self) -> &'static str {
+        "mistral"
+    }
+
+    async fn stream(
+        &self,
+        ctx: ProviderContext,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> std::result::Result<(), LlmError> {
+        let ProviderContext {
+            client,
+            config,
+            model,
+            api_key,
+            request,
+        } = ctx;
+
+        let url = join_url(&config.base_url, "v1/chat/completions");
+        let temperature = request.temperature.unwrap_or(0.7);
+        let max_tokens = request.max_tokens.unwrap_or(4000);
+
+        let payload = json!({
+            "model": model,
+            "messages": request.messages,
+            "stream": true,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        });
+
+        info!(
+            event = "llm_http_request",
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            model = payload["model"].as_str().unwrap_or_default(),
+            url = %url,
+            "sending Mistral streaming request"
+        );
+
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+
+        let response = ensure_success(response, self.id()).await?;
+
+        debug!(
+            event = "llm_http_response",
+            provider = config.name.as_str(),
+            provider_id = self.id(),
+            status = %response.status(),
+            "Mistral response accepted"
+        );
+
+        process_sse_stream(response, tx).await
+    }
+}
+
+fn join_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{base}/{path}")
 }
 
 async fn ensure_success(
@@ -771,102 +700,7 @@ async fn ensure_success(
             Err(err) => format!("failed to read error body: {err}"),
         };
         Err(LlmError::Http { status, message })
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "OpenRouter API returned error"
-            );
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            let detail = if error_text.trim().is_empty() {
-                "<empty response>".to_string()
-            } else {
-                error_text
-            };
-            return Err(anyhow::anyhow!(
-                "OpenRouter API error (status {}): {}",
-                status,
-                detail
-            ));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "OpenRouter response accepted"
-        );
-
-        Self::process_sse_stream(response, tx).await
     }
-
-    /// Stream from Mistral AI API
-    async fn stream_mistral(
-        client: reqwest::Client,
-        provider: ModelProvider,
-        model: String,
-        api_key: String,
-        request: LlmRequest,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> Result<()> {
-        let url = format!("{}/v1/chat/completions", provider.base_url);
-
-        let payload = serde_json::json!({
-            "model": model,
-            "messages": request.messages,
-            "stream": true,
-            "temperature": request.temperature.unwrap_or(0.7),
-            "max_tokens": request.max_tokens.unwrap_or(4000)
-        });
-
-        info!(
-            event = "llm_http_request",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            url = %url,
-            "sending Mistral streaming request"
-        );
-
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            error!(
-                event = "llm_http_error",
-                provider = provider.name.as_str(),
-                model = model.as_str(),
-                status = %response.status(),
-                "Mistral API returned error"
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Mistral API error: {}", error_text));
-        }
-
-        debug!(
-            event = "llm_http_response",
-            provider = provider.name.as_str(),
-            model = model.as_str(),
-            status = %response.status(),
-            "Mistral response accepted"
-        );
-
-        Self::process_sse_stream(response, tx).await
-    }
-}
-
-fn join_url(base: &str, path: &str) -> String {
-    let base = base.trim_end_matches('/');
-    let path = path.trim_start_matches('/');
-    format!("{base}/{path}")
 }
 
 async fn process_sse_stream(
@@ -891,67 +725,16 @@ async fn process_sse_stream(
                 let data = &line[6..];
                 if data == "[DONE]" {
                     if !assistant_text.is_empty() {
-                        let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
-    /// Process Server-Sent Events stream (OpenAI, xAI, OpenRouter, Mistral)
-    async fn process_sse_stream(
-        response: reqwest::Response,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> Result<()> {
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut assistant_text = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            trace!(event = "llm_stream_chunk", bytes = chunk.len());
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
-
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
-                    if data == "[DONE]" {
-                        // Emit final accumulated message if we have content
-                        if !assistant_text.is_empty() {
-                            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
-                        }
-                        let _ = tx.send(LlmEvent::StreamComplete).await;
-                        return Ok(());
-                    }
-
-                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(choices) = chunk.get("choices").and_then(|c| c.get(0)) {
-                            // Handle streaming deltas
-                            if let Some(delta) = choices.get("delta") {
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-                                {
-                                    assistant_text.push_str(content);
-                                    let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
-                                }
-                            }
-
-                            // Handle finish_reason
-                            if let Some(finish_reason) =
-                                choices.get("finish_reason").and_then(|v| v.as_str())
-                            {
-                                if finish_reason == "stop" && !assistant_text.is_empty() {
-                                    let _ = tx
-                                        .send(LlmEvent::ResponseComplete(assistant_text.clone()))
-                                        .await;
-                                }
-                            }
-                        }
+                        let _ = tx
+                            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                            .await;
                     }
                     let _ = tx.send(LlmEvent::StreamComplete).await;
                     return Ok(());
                 }
 
-                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) {
+                if let Ok(value) = serde_json::from_str::<Value>(data) {
+                    if let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) {
                         if let Some(delta) = choice.get("delta") {
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                 assistant_text.push_str(content);
@@ -981,72 +764,10 @@ async fn process_sse_stream(
         }
     }
 
-    let line = buffer.trim();
-    if line.starts_with("data: ") {
-        let data = &line[6..];
-        if data != "[DONE]" {
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(choice) = chunk.get("choices").and_then(|c| c.get(0)) {
-                    if let Some(delta) = choice.get("delta") {
-                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                            assistant_text.push_str(content);
-                            let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
-    /// Process Anthropic streaming format
-    async fn process_anthropic_stream(
-        response: reqwest::Response,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> Result<()> {
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut assistant_text = String::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            trace!(event = "llm_stream_chunk", bytes = chunk.len());
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
-
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
-                    if data == "[DONE]" {
-                        // Emit final accumulated message if we have content
-                        if !assistant_text.is_empty() {
-                            let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
-                        }
-                        let _ = tx.send(LlmEvent::StreamComplete).await;
-                        return Ok(());
-                    }
-
-                    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(content_block) = chunk.get("content_block") {
-                            if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
-                                assistant_text.push_str(text);
-                                let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
-                            }
-                        }
-
-                        // Handle stop event
-                        if let Some(stop_reason) = chunk.get("stop_reason").and_then(|v| v.as_str())
-                        {
-                            if stop_reason == "end_turn" && !assistant_text.is_empty() {
-                                let _ = tx
-                                    .send(LlmEvent::ResponseComplete(assistant_text.clone()))
-                                    .await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     if !assistant_text.is_empty() {
-        let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+        let _ = tx
+            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+            .await;
     }
     let _ = tx.send(LlmEvent::StreamComplete).await;
     Ok(())
@@ -1074,21 +795,23 @@ async fn process_anthropic_stream(
                 let data = &line[6..];
                 if data == "[DONE]" {
                     if !assistant_text.is_empty() {
-                        let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+                        let _ = tx
+                            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                            .await;
                     }
                     let _ = tx.send(LlmEvent::StreamComplete).await;
                     return Ok(());
                 }
 
-                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(content_block) = chunk.get("content_block") {
+                if let Ok(value) = serde_json::from_str::<Value>(data) {
+                    if let Some(content_block) = value.get("content_block") {
                         if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
                             assistant_text.push_str(text);
                             let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
                         }
                     }
 
-                    if let Some(stop_reason) = chunk.get("stop_reason").and_then(|v| v.as_str()) {
+                    if let Some(stop_reason) = value.get("stop_reason").and_then(|v| v.as_str()) {
                         if stop_reason == "end_turn" && !assistant_text.is_empty() {
                             let _ = tx
                                 .send(LlmEvent::ResponseComplete(assistant_text.clone()))
@@ -1100,23 +823,10 @@ async fn process_anthropic_stream(
         }
     }
 
-    let line = buffer.trim();
-    if line.starts_with("data: ") {
-        let data = &line[6..];
-        if data != "[DONE]" {
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(content_block) = chunk.get("content_block") {
-                    if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
-                        assistant_text.push_str(text);
-                        let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
-                    }
-                }
-            }
-        }
-    }
-
     if !assistant_text.is_empty() {
-        let _ = tx.send(LlmEvent::ResponseComplete(assistant_text)).await;
+        let _ = tx
+            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+            .await;
     }
     let _ = tx.send(LlmEvent::StreamComplete).await;
     Ok(())
@@ -1134,16 +844,11 @@ async fn process_google_stream(
         trace!(event = "llm_stream_chunk", bytes = chunk.len());
         buffer.extend_from_slice(&chunk);
     }
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            trace!(event = "llm_stream_chunk", bytes = chunk.len());
-            buffer.extend_from_slice(&chunk);
-        }
 
     let buffer_str = String::from_utf8_lossy(&buffer);
     let mut latest_text = String::new();
 
-    if let Ok(response_array) = serde_json::from_str::<Vec<serde_json::Value>>(&buffer_str) {
+    if let Ok(response_array) = serde_json::from_str::<Vec<Value>>(&buffer_str) {
         for response_json in response_array {
             if let Some(chunk_text) = extract_google_text(&response_json) {
                 if chunk_text.len() > latest_text.len() {
@@ -1151,37 +856,31 @@ async fn process_google_stream(
                 }
             }
         }
-    } else if let Ok(response_json) = serde_json::from_str::<serde_json::Value>(&buffer_str) {
+    } else if let Ok(response_json) = serde_json::from_str::<Value>(&buffer_str) {
         if let Some(chunk_text) = extract_google_text(&response_json) {
-            if chunk_text.len() > latest_text.len() {
-                latest_text = chunk_text;
-            }
+            latest_text = chunk_text;
         }
     } else {
-        let mut deserializer =
-            serde_json::Deserializer::from_str(&buffer_str).into_iter::<serde_json::Value>();
+        let mut deserializer = serde_json::Deserializer::from_str(&buffer_str).into_iter::<Value>();
         while let Some(Ok(value)) = deserializer.next() {
             if let Some(chunk_text) = extract_google_text(&value) {
                 if chunk_text.len() > latest_text.len() {
                     latest_text = chunk_text;
-        } else {
-            // Attempt to parse concatenated JSON objects without delimiters
-            let mut deserializer =
-                serde_json::Deserializer::from_str(&buffer_str).into_iter::<serde_json::Value>();
-            while let Some(Ok(value)) = deserializer.next() {
-                if let Some(chunk_text) = Self::extract_google_text(&value) {
-                    if chunk_text.len() > latest_text.len() {
-                        latest_text = chunk_text;
-                    }
                 }
             }
         }
     }
 
-    if !latest_text.is_empty() {
-        simulate_streaming(&latest_text, tx.clone()).await;
-        let _ = tx.send(LlmEvent::ResponseComplete(latest_text)).await;
+    if latest_text.is_empty() {
+        return Err(LlmError::UnexpectedFormat(
+            "Google response did not include text content".to_string(),
+        ));
     }
+
+    simulate_streaming(&latest_text, tx.clone()).await;
+    let _ = tx
+        .send(LlmEvent::ResponseComplete(latest_text.clone()))
+        .await;
     let _ = tx.send(LlmEvent::StreamComplete).await;
     Ok(())
 }
@@ -1191,31 +890,6 @@ async fn simulate_streaming(text: &str, tx: mpsc::Sender<LlmEvent>) {
         for ch in text.chars() {
             let _ = tx.send(LlmEvent::TextDelta(ch.to_string())).await;
             sleep(Duration::from_millis(30)).await;
-    /// Simulate streaming by breaking text into chunks with delays
-    async fn simulate_streaming(text: &str, tx: mpsc::Sender<LlmEvent>) {
-        // For short responses, stream character by character
-        // For longer responses, stream word by word
-        if text.len() < 50 {
-            for ch in text.chars() {
-                let _ = tx.send(LlmEvent::TextDelta(ch.to_string())).await;
-                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-            }
-        } else {
-            let words: Vec<&str> = text.split_whitespace().collect();
-
-            for (i, word) in words.iter().enumerate() {
-                let chunk = if i == 0 {
-                    word.to_string()
-                } else {
-                    format!(" {}", word)
-                };
-
-                // Send the chunk
-                let _ = tx.send(LlmEvent::TextDelta(chunk)).await;
-
-                // Add a small delay to simulate typing
-                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
-            }
         }
     } else {
         let words: Vec<&str> = text.split_whitespace().collect();
@@ -1232,27 +906,8 @@ async fn simulate_streaming(text: &str, tx: mpsc::Sender<LlmEvent>) {
         }
     }
 }
-    /// Extract concatenated text from Google response JSON
-    fn extract_google_text(value: &serde_json::Value) -> Option<String> {
-        let mut collected = String::new();
 
-        if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
-            for candidate in candidates {
-                let parts_iter = candidate
-                    .get("content")
-                    .and_then(|content| {
-                        if content.is_array() {
-                            content.as_array().cloned()
-                        } else {
-                            content
-                                .get("parts")
-                                .and_then(|parts| parts.as_array().cloned())
-                        }
-                    })
-                    .into_iter()
-                    .flatten();
-
-fn extract_google_text(value: &serde_json::Value) -> Option<String> {
+fn extract_google_text(value: &Value) -> Option<String> {
     let mut collected = String::new();
 
     if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
@@ -1286,8 +941,8 @@ fn extract_google_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Helper to create system messages for different modes
 impl LlmRequest {
+    /// Construct a new request targeting the specified mode.
     pub fn new(messages: Vec<LlmMessage>, mode: BindrMode) -> Self {
         Self {
             messages,
@@ -1299,18 +954,19 @@ impl LlmRequest {
         }
     }
 
-    #[allow(dead_code)]
+    /// Attach a temperature override to the request.
     pub fn with_temperature(mut self, temp: f32) -> Self {
         self.temperature = Some(temp);
         self
     }
 
-    #[allow(dead_code)]
+    /// Attach a max token override to the request.
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens = Some(tokens);
         self
     }
 
+    /// Specify a provider identifier to override the configuration default.
     pub fn with_provider<S: Into<String>>(mut self, provider: S) -> Self {
         let value = provider.into();
         if !value.is_empty() {
@@ -1319,6 +975,7 @@ impl LlmRequest {
         self
     }
 
+    /// Specify a model identifier to override the configuration default.
     pub fn with_model<S: Into<String>>(mut self, model: S) -> Self {
         let value = model.into();
         if !value.is_empty() {

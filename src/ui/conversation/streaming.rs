@@ -1,4 +1,5 @@
 use crate::events::{BindrMode, LlmStreamEvent};
+use crate::llm::LlmEvent;
 use crate::streaming::StreamController;
 use ratatui::{
     buffer::Buffer,
@@ -44,25 +45,25 @@ impl StreamingResponse {
         match event {
             LlmStreamEvent::TextDelta(delta) => {
                 self.current_response.push_str(&delta);
-                let llm_event = crate::llm::LlmEvent::TextDelta(delta);
+                let llm_event = LlmEvent::TextDelta(delta);
                 self.controller.process_event(llm_event).unwrap_or_default();
                 true
             }
             LlmStreamEvent::ResponseComplete(content) => {
                 self.current_response = content.clone();
-                let llm_event = crate::llm::LlmEvent::ResponseComplete(content);
+                let llm_event = LlmEvent::ResponseComplete(content);
                 self.controller.process_event(llm_event).unwrap_or_default();
                 true
             }
             LlmStreamEvent::ReasoningDelta(delta) => {
                 // Handle reasoning content
-                let llm_event = crate::llm::LlmEvent::ReasoningDelta(delta);
+                let llm_event = LlmEvent::ReasoningDelta(delta);
                 self.controller.process_event(llm_event).unwrap_or_default();
                 true
             }
             LlmStreamEvent::StreamComplete => {
                 self.is_streaming = false;
-                let llm_event = crate::llm::LlmEvent::StreamComplete;
+                let llm_event = LlmEvent::StreamComplete;
                 self.controller.process_event(llm_event).unwrap_or_default();
                 false // Streaming complete
             }
@@ -94,7 +95,6 @@ impl StreamingResponse {
     }
 
     /// Clear the response
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.current_response.clear();
         self.response_lines.clear();
@@ -108,6 +108,18 @@ impl StreamingResponse {
     }
 }
 
+impl From<LlmEvent> for LlmStreamEvent {
+    fn from(event: LlmEvent) -> Self {
+        match event {
+            LlmEvent::TextDelta(delta) => LlmStreamEvent::TextDelta(delta),
+            LlmEvent::ResponseComplete(content) => LlmStreamEvent::ResponseComplete(content),
+            LlmEvent::ReasoningDelta(reasoning) => LlmStreamEvent::ReasoningDelta(reasoning),
+            LlmEvent::StreamComplete => LlmStreamEvent::StreamComplete,
+            LlmEvent::Error(error) => LlmStreamEvent::Error(error),
+        }
+    }
+}
+
 impl Widget for StreamingResponse {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if !self.is_streaming && self.current_response.is_empty() {
@@ -115,19 +127,22 @@ impl Widget for StreamingResponse {
         }
 
         let mut y_offset = 0;
-        
+
         // Render streaming indicator with animated dots
         if self.is_streaming {
             let dots = match (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis() / 300) % 4 {
+                .as_millis()
+                / 300)
+                % 4
+            {
                 0 => ".",
                 1 => "..",
                 2 => "...",
                 _ => "   ",
             };
-            
+
             let indicator = Line::from(vec![
                 Span::styled("🤖 ", Style::default().fg(Color::Green)),
                 Span::styled("Bindr is thinking", Style::default().fg(Color::Green)),
@@ -139,7 +154,10 @@ impl Widget for StreamingResponse {
 
         // Render current response content
         if !self.current_response.is_empty() {
-            let content_lines = self.wrap_text(&self.current_response, area.width.saturating_sub(2) as usize);
+            let content_lines = self.wrap_text(
+                &self.current_response,
+                area.width.saturating_sub(2) as usize,
+            );
             for line in content_lines {
                 if y_offset < area.height {
                     let response_line = Line::from(vec![
@@ -157,12 +175,16 @@ impl Widget for StreamingResponse {
             let cursor_char = if (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis() / 500) % 2 == 0 {
+                .as_millis()
+                / 500)
+                % 2
+                == 0
+            {
                 "▋"
             } else {
                 " "
             };
-            
+
             let cursor_line = Line::from(vec![
                 Span::raw("  "),
                 Span::styled(cursor_char, Style::default().fg(Color::Green)),
@@ -178,10 +200,10 @@ impl StreamingResponse {
         if width == 0 {
             return vec![text.to_string()];
         }
-        
+
         let mut lines = Vec::new();
         let mut current_line = String::new();
-        
+
         for word in text.split_whitespace() {
             if current_line.len() + word.len() + 1 <= width {
                 if !current_line.is_empty() {
@@ -196,15 +218,15 @@ impl StreamingResponse {
                 current_line.push_str(word);
             }
         }
-        
+
         if !current_line.is_empty() {
             lines.push(current_line);
         }
-        
+
         if lines.is_empty() {
             lines.push(String::new());
         }
-        
+
         lines
     }
 }
