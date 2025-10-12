@@ -131,11 +131,11 @@ impl KernelAgent for ModeAgent {
                 }
             }
 
-            if let Some(tx) = response_tx.as_ref() {
-                if tx.send(event.clone()).is_err() {
-                    debug!(agent = %broker.agent_id(), "response channel closed by consumer");
-                    response_tx = None;
-                }
+            if let Some(tx) = response_tx.as_ref()
+                && tx.send(event.clone()).is_err()
+            {
+                debug!(agent = %broker.agent_id(), "response channel closed by consumer");
+                response_tx = None;
             }
         }
 

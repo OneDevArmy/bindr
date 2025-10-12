@@ -46,13 +46,12 @@ impl SessionManager {
             let entry = entry.context("Failed to read directory entry")?;
             let path = entry.path();
 
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(session_info) = serde_json::from_str::<SessionInfo>(&content) {
-                        self.sessions
-                            .insert(session_info.session_id.clone(), session_info);
-                    }
-                }
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(content) = fs::read_to_string(&path)
+                && let Ok(session_info) = serde_json::from_str::<SessionInfo>(&content)
+            {
+                self.sessions
+                    .insert(session_info.session_id.clone(), session_info);
             }
         }
 

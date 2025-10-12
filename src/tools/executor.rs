@@ -63,11 +63,11 @@ impl ToolExecutor {
             .await
             .with_context(|| format!("failed to read {}", path.display()))?;
         let mut content = String::from_utf8_lossy(&bytes).into_owned();
-        if let Some(limit) = opts.max_bytes {
-            if content.len() > limit {
-                content.truncate(limit);
-                content.push_str("\n… [truncated]");
-            }
+        if let Some(limit) = opts.max_bytes
+            && content.len() > limit
+        {
+            content.truncate(limit);
+            content.push_str("\n… [truncated]");
         }
         Ok(ToolExecutionResult {
             summary: format!("Read {} bytes from {}", content.len(), opts.path.display()),
@@ -86,12 +86,13 @@ impl ToolExecutor {
 
         let mut lines = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
-            if !opts.include_hidden {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                }
+            if !opts.include_hidden
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with('.'))
+            {
+                continue;
             }
 
             let file_type = entry.file_type().await?;
@@ -101,11 +102,11 @@ impl ToolExecutor {
             }
             lines.push(name);
 
-            if let Some(max) = opts.max_entries {
-                if lines.len() >= max {
-                    lines.push("…".to_string());
-                    break;
-                }
+            if let Some(max) = opts.max_entries
+                && lines.len() >= max
+            {
+                lines.push("…".to_string());
+                break;
             }
         }
 

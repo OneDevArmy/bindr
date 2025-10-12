@@ -657,11 +657,11 @@ mod tests {
                 .await
                 .expect("event available")
                 .expect("channel open");
-            if let KernelEvent::IntentState { state, .. } = event {
-                if matches!(state, IntentState::Completed) {
-                    saw_completion = true;
-                    break;
-                }
+            if let KernelEvent::IntentState { state, .. } = event
+                && matches!(state, IntentState::Completed)
+            {
+                saw_completion = true;
+                break;
             }
         }
 

@@ -722,31 +722,32 @@ async fn process_sse_stream(
                     break;
                 }
 
-                if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    if let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) {
-                        if let Some(delta) = choice.get("delta") {
-                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                assistant_text.push_str(content);
-                                let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
-                            }
-
-                            if let Some(reasoning) = delta.get("reasoning").and_then(|r| r.as_str())
-                            {
-                                let _ = tx
-                                    .send(LlmEvent::ReasoningDelta(reasoning.to_string()))
-                                    .await;
-                            }
+                if let Ok(value) = serde_json::from_str::<Value>(data)
+                    && let Some(choice) = value.get("choices").and_then(|choices| choices.get(0))
+                {
+                    if let Some(delta) = choice.get("delta") {
+                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                            assistant_text.push_str(content);
+                            let _ = tx.send(LlmEvent::TextDelta(content.to_string())).await;
                         }
 
-                        if let Some(finish_reason) =
-                            choice.get("finish_reason").and_then(|v| v.as_str())
-                        {
-                            if finish_reason == "stop" && !assistant_text.is_empty() {
-                                let _ = tx
-                                    .send(LlmEvent::ResponseComplete(assistant_text.clone()))
-                                    .await;
-                            }
+                        if let Some(reasoning) = delta.get("reasoning").and_then(|r| r.as_str()) {
+                            let _ = tx
+                                .send(LlmEvent::ReasoningDelta(reasoning.to_string()))
+                                .await;
                         }
+                    }
+
+                    if choice
+                        .get("finish_reason")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|finish_reason| {
+                            finish_reason == "stop" && !assistant_text.is_empty()
+                        })
+                    {
+                        let _ = tx
+                            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                            .await;
                     }
                 }
             }
@@ -793,19 +794,23 @@ async fn process_anthropic_stream(
                 }
 
                 if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    if let Some(content_block) = value.get("content_block") {
-                        if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
-                            assistant_text.push_str(text);
-                            let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
-                        }
+                    if let Some(content_block) = value.get("content_block")
+                        && let Some(text) = content_block.get("text").and_then(|t| t.as_str())
+                    {
+                        assistant_text.push_str(text);
+                        let _ = tx.send(LlmEvent::TextDelta(text.to_string())).await;
                     }
 
-                    if let Some(stop_reason) = value.get("stop_reason").and_then(|v| v.as_str()) {
-                        if stop_reason == "end_turn" && !assistant_text.is_empty() {
-                            let _ = tx
-                                .send(LlmEvent::ResponseComplete(assistant_text.clone()))
-                                .await;
-                        }
+                    if value
+                        .get("stop_reason")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|stop_reason| {
+                            stop_reason == "end_turn" && !assistant_text.is_empty()
+                        })
+                    {
+                        let _ = tx
+                            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
+                            .await;
                     }
                 }
             }
@@ -839,10 +844,10 @@ async fn process_google_stream(
 
     if let Ok(response_array) = serde_json::from_str::<Vec<Value>>(&buffer_str) {
         for response_json in response_array {
-            if let Some(chunk_text) = extract_google_text(&response_json) {
-                if chunk_text.len() > latest_text.len() {
-                    latest_text = chunk_text;
-                }
+            if let Some(chunk_text) = extract_google_text(&response_json)
+                && chunk_text.len() > latest_text.len()
+            {
+                latest_text = chunk_text;
             }
         }
     } else if let Ok(response_json) = serde_json::from_str::<Value>(&buffer_str) {
@@ -852,10 +857,10 @@ async fn process_google_stream(
     } else {
         let mut deserializer = serde_json::Deserializer::from_str(&buffer_str).into_iter::<Value>();
         while let Some(Ok(value)) = deserializer.next() {
-            if let Some(chunk_text) = extract_google_text(&value) {
-                if chunk_text.len() > latest_text.len() {
-                    latest_text = chunk_text;
-                }
+            if let Some(chunk_text) = extract_google_text(&value)
+                && chunk_text.len() > latest_text.len()
+            {
+                latest_text = chunk_text;
             }
         }
     }

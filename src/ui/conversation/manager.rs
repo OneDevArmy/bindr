@@ -363,20 +363,20 @@ impl ConversationManager {
                             }
                         }
                         "tool:pending" => {
-                            if let Some(id_str) = payload.get("id").and_then(|v| v.as_str()) {
-                                if let Ok(id) = Uuid::parse_str(id_str) {
-                                    let tool = payload
-                                        .get("tool")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("tool");
-                                    let summary = format!(
-                                        "🟡 Approval pending for {tool} (id {short})",
-                                        short = &id_str[..8]
-                                    );
-                                    self.log_activity(summary.clone());
-                                    if !self.pending_tools.iter().any(|item| item.id == id) {
-                                        self.pending_tools.push(PendingToolItem { id, summary });
-                                    }
+                            if let Some(id_str) = payload.get("id").and_then(|v| v.as_str())
+                                && let Ok(id) = Uuid::parse_str(id_str)
+                            {
+                                let tool = payload
+                                    .get("tool")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("tool");
+                                let summary = format!(
+                                    "🟡 Approval pending for {tool} (id {short})",
+                                    short = &id_str[..8]
+                                );
+                                self.log_activity(summary.clone());
+                                if !self.pending_tools.iter().any(|item| item.id == id) {
+                                    self.pending_tools.push(PendingToolItem { id, summary });
                                 }
                             }
                         }

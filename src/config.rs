@@ -494,10 +494,10 @@ impl Config {
     /// Find the Bindr home directory
     pub fn find_bindr_home() -> Result<PathBuf> {
         // Honor the `BINDR_HOME` environment variable when it is set
-        if let Ok(val) = std::env::var("BINDR_HOME") {
-            if !val.is_empty() {
-                return Ok(PathBuf::from(val));
-            }
+        if let Ok(val) = std::env::var("BINDR_HOME")
+            && !val.is_empty()
+        {
+            return Ok(PathBuf::from(val));
         }
 
         let mut p =
