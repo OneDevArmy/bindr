@@ -61,7 +61,7 @@ impl IntentClassifier {
                 vocabulary.insert(token.clone());
                 token_counts
                     .entry(*mode)
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .entry(token.clone())
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
@@ -132,13 +132,10 @@ impl IntentClassifier {
         let (mode, confidence) = normalize_scores(&scores);
         let matching_tokens = explain_tokens(tokens.iter(), mode, &self.token_log_probs);
         let rationale = if matching_tokens.is_empty() {
-            format!("predicted {:?} with confidence {:.2}", mode, confidence)
+            format!("predicted {mode:?} with confidence {confidence:.2}")
         } else {
-            format!(
-                "predicted {:?} on tokens: {}",
-                mode,
-                matching_tokens.join(", ")
-            )
+            let tokens = matching_tokens.join(", ");
+            format!("predicted {mode:?} on tokens: {tokens}")
         };
 
         IntentDecision::new(mode, confidence, rationale)

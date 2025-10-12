@@ -9,9 +9,7 @@ pub fn mode_prompt(mode: BindrMode, provider: &str, model: &str) -> String {
     );
 
     let identity = format!(
-        "Environment:\n- Interface: Bindr terminal UI (no browser, no GUI).\n- Kernel: supervises tool execution, approvals, and persistence.\n- Active model: {provider}::{model}. Identify yourself using this provider/model, not as \"Bindr\".\n\n",
-        provider = provider,
-        model = model
+        "Environment:\n- Interface: Bindr terminal UI (no browser, no GUI).\n- Kernel: supervises tool execution, approvals, and persistence.\n- Active model: {provider}::{model}. Identify yourself using this provider/model, not as \"Bindr\".\n\n"
     );
 
     let tooling = r#"Tool Invocation Protocol:

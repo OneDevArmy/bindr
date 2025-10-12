@@ -66,7 +66,7 @@ impl SessionManager {
             .sessions
             .values()
             .find(|s| s.project_name == name)
-            .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", name))?
+            .ok_or_else(|| anyhow::anyhow!("Project '{name}' not found"))?
             .clone();
 
         // Load project state

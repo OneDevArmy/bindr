@@ -16,6 +16,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
+    Frame,
 };
 use tracing::error;
 
@@ -102,8 +103,8 @@ impl App {
     }
 }
 
-fn draw_home_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_home_view(
+    f: &mut Frame<'_>,
     app: &App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -121,7 +122,7 @@ fn draw_home_view<B: Backend>(
                 if app.config.has_api_key() {
                     "Unlimited Access".to_string()
                 } else {
-                    format!("Free Tier ({}/{} messages today)", used, limit)
+                    format!("Free Tier ({used}/{limit} messages today)")
                 }
             },
             Style::default().fg(ACCENT_YELLOW),
@@ -265,8 +266,8 @@ fn draw_home_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_select_provider_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_select_provider_view(
+    f: &mut Frame<'_>,
     app: &App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -291,7 +292,7 @@ fn draw_select_provider_view<B: Backend>(
 
         items.push(Line::from(vec![
             Span::styled(
-                format!("{} ", status),
+                format!("{status} "),
                 Style::default().fg(if has_key {
                     ACCENT_GREEN
                 } else {
@@ -348,11 +349,7 @@ fn draw_select_provider_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_add_key_view<B: Backend>(
-    f: &mut ratatui::Frame,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn draw_add_key_view(f: &mut Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let header = Paragraph::new("Bindr")
         .style(
             Style::default()
@@ -427,8 +424,9 @@ fn draw_add_key_view<B: Backend>(
     let mut provider_info = Vec::new();
     if let Some(provider) = current_provider {
         provider_info.push(Line::from(""));
+        let provider_name = &provider.name;
         provider_info.push(Line::from(Span::styled(
-            format!("Provider: {}", provider.name),
+            format!("Provider: {provider_name}"),
             Style::default()
                 .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
@@ -468,8 +466,8 @@ fn draw_add_key_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_select_model_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_select_model_view(
+    f: &mut Frame<'_>,
     app: &App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -500,6 +498,7 @@ fn draw_select_model_view<B: Backend>(
             };
 
             let premium_indicator = if model.is_premium { "💎 " } else { "🆓 " };
+            let description = &model.description;
 
             items.push(Line::from(vec![
                 Span::styled(
@@ -512,7 +511,7 @@ fn draw_select_model_view<B: Backend>(
                 ),
                 Span::styled(model.name.clone(), style),
                 Span::styled(
-                    format!(" - {}", model.description),
+                    format!(" - {description}"),
                     Style::default().fg(TEXT_SECONDARY),
                 ),
             ]));
@@ -565,8 +564,8 @@ fn draw_select_model_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_custom_model_input_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_custom_model_input_view(
+    f: &mut Frame<'_>,
     app: &App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -673,8 +672,8 @@ fn draw_custom_model_input_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_model_selection_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_model_selection_view(
+    f: &mut Frame<'_>,
     app: &App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -703,6 +702,8 @@ fn draw_model_selection_view<B: Backend>(
     if let Some(provider) = current_provider {
         if let Some(model) = provider.models.iter().find(|m| m.id == current_model) {
             let premium_indicator = if model.is_premium { "💎 " } else { "🆓 " };
+            let model_name = &model.name;
+            let provider_name = &provider.name;
             items.push(Line::from(vec![
                 Span::styled(
                     "→ ",
@@ -719,7 +720,7 @@ fn draw_model_selection_view<B: Backend>(
                     }),
                 ),
                 Span::styled(
-                    format!("{} ({})", model.name, provider.name),
+                    format!("{model_name} ({provider_name})"),
                     Style::default()
                         .fg(ACCENT_BLUE)
                         .add_modifier(Modifier::BOLD),
@@ -752,6 +753,8 @@ fn draw_model_selection_view<B: Backend>(
             };
 
             let premium_indicator = if model.is_premium { "💎 " } else { "🆓 " };
+            let model_name = &model.name;
+            let provider_name = &provider.name;
 
             items.push(Line::from(vec![
                 Span::styled(
@@ -762,9 +765,9 @@ fn draw_model_selection_view<B: Backend>(
                         ACCENT_GREEN
                     }),
                 ),
-                Span::styled(format!("{} ({})", model.name, provider.name), style),
+                Span::styled(format!("{model_name} ({provider_name})"), style),
                 Span::styled(
-                    format!(" - Provider ID: {}", provider_id),
+                    format!(" - Provider ID: {provider_id}"),
                     Style::default().fg(TEXT_SECONDARY),
                 ),
             ]));
@@ -820,8 +823,8 @@ fn draw_model_selection_view<B: Backend>(
     f.render_widget(footer, chunks[2]);
 }
 
-fn draw_conversation_view<B: Backend>(
-    f: &mut ratatui::Frame,
+fn draw_conversation_view(
+    f: &mut Frame<'_>,
     app: &mut App,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
@@ -846,15 +849,15 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                 .split(size);
 
             match app.view {
-                AppView::Home => draw_home_view::<B>(f, app, chunks.to_vec()),
-                AppView::SelectProvider => draw_select_provider_view::<B>(f, app, chunks.to_vec()),
-                AppView::AddKey => draw_add_key_view::<B>(f, app, chunks.to_vec()),
-                AppView::SelectModel => draw_select_model_view::<B>(f, app, chunks.to_vec()),
+                AppView::Home => draw_home_view(f, app, chunks.to_vec()),
+                AppView::SelectProvider => draw_select_provider_view(f, app, chunks.to_vec()),
+                AppView::AddKey => draw_add_key_view(f, app, chunks.to_vec()),
+                AppView::SelectModel => draw_select_model_view(f, app, chunks.to_vec()),
                 AppView::CustomModelInput => {
-                    draw_custom_model_input_view::<B>(f, app, chunks.to_vec())
+                    draw_custom_model_input_view(f, app, chunks.to_vec())
                 }
-                AppView::Conversation => draw_conversation_view::<B>(f, app, chunks.to_vec()),
-                AppView::ModelSelection => draw_model_selection_view::<B>(f, app, chunks.to_vec()),
+                AppView::Conversation => draw_conversation_view(f, app, chunks.to_vec()),
+                AppView::ModelSelection => draw_model_selection_view(f, app, chunks.to_vec()),
             }
         })?;
 
@@ -890,7 +893,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                 let provider_id = app.config.selected_provider.clone();
                                 app.config.set_api_key(provider_id, app.key_input.clone());
                                 if let Err(e) = app.config.save() {
-                                    eprintln!("Failed to save config: {}", e);
+                                    eprintln!("Failed to save config: {e}");
                                 }
 
                                 app.sync_runtime_config().await;
@@ -979,7 +982,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                         app.config.default_model = model.id.clone();
 
                                         if let Err(e) = app.config.save() {
-                                            eprintln!("Failed to save config: {}", e);
+                                            eprintln!("Failed to save config: {e}");
                                         }
 
                                         app.sync_runtime_config().await;
@@ -1004,7 +1007,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                 app.config.set_custom_model(app.custom_model_input.clone());
 
                                 if let Err(e) = app.config.save() {
-                                    eprintln!("Failed to save config: {}", e);
+                                    eprintln!("Failed to save config: {e}");
                                 }
 
                                 app.sync_runtime_config().await;
@@ -1042,7 +1045,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                     conversation::manager::ConversationAction::None => {}
                                 },
                                 Err(e) => {
-                                    eprintln!("Error handling input: {}", e);
+                                    eprintln!("Error handling input: {e}");
                                 }
                             }
                         }
@@ -1090,7 +1093,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> i
                                 app.config.default_model = model_id;
 
                                 if let Err(e) = app.config.save() {
-                                    eprintln!("Failed to save config: {}", e);
+                                    eprintln!("Failed to save config: {e}");
                                 }
 
                                 app.sync_runtime_config().await;

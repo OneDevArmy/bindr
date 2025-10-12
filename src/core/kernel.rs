@@ -595,9 +595,11 @@ mod tests {
 
     #[tokio::test]
     async fn kernel_restarts_panicked_agent() {
-        let mut config = KernelConfig::default();
-        config.max_restarts = 1;
-        config.restart_backoff = Duration::from_millis(10);
+        let config = KernelConfig {
+            max_restarts: 1,
+            restart_backoff: Duration::from_millis(10),
+            ..KernelConfig::default()
+        };
 
         let mut kernel = AgentKernel::new(config);
         let mut events = kernel.subscribe();

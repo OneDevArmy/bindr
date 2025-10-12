@@ -295,7 +295,7 @@ impl ModelProvider for OpenAiProvider {
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
@@ -422,8 +422,7 @@ impl ModelProvider for GoogleProvider {
 
         let base = config.base_url.trim_end_matches('/');
         let url = format!(
-            "{base}/models/{}:streamGenerateContent?key={api_key}",
-            model
+            "{base}/models/{model}:streamGenerateContent?key={api_key}",
         );
 
         let mut contents = Vec::new();
@@ -530,7 +529,7 @@ impl ModelProvider for XaiProvider {
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
@@ -594,7 +593,7 @@ impl ModelProvider for OpenRouterProvider {
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", "https://bindrcli.com")
             .header("X-Title", "Bindr")
@@ -660,7 +659,7 @@ impl ModelProvider for MistralProvider {
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
@@ -716,21 +715,13 @@ async fn process_sse_stream(
         trace!(event = "llm_stream_chunk", bytes = chunk.len());
         let text = String::from_utf8_lossy(&chunk);
         buffer.push_str(&text);
-
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim().to_string();
             buffer = buffer[newline_pos + 1..].to_string();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ").map(str::trim) {
                 if data == "[DONE]" {
-                    if !assistant_text.is_empty() {
-                        let _ = tx
-                            .send(LlmEvent::ResponseComplete(assistant_text.clone()))
-                            .await;
-                    }
-                    let _ = tx.send(LlmEvent::StreamComplete).await;
-                    return Ok(());
+                    break;
                 }
 
                 if let Ok(value) = serde_json::from_str::<Value>(data) {
@@ -791,8 +782,8 @@ async fn process_anthropic_stream(
             let line = buffer[..newline_pos].trim().to_string();
             buffer = buffer[newline_pos + 1..].to_string();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
                 if data == "[DONE]" {
                     if !assistant_text.is_empty() {
                         let _ = tx
@@ -898,7 +889,7 @@ async fn simulate_streaming(text: &str, tx: mpsc::Sender<LlmEvent>) {
             let chunk = if i == 0 {
                 word.to_string()
             } else {
-                format!(" {}", word)
+                format!(" {word}")
             };
 
             let _ = tx.send(LlmEvent::TextDelta(chunk)).await;

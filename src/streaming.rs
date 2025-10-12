@@ -104,7 +104,7 @@ impl StreamController {
             LlmEvent::ReasoningDelta(delta) => {
                 // For now, treat reasoning the same as text
                 // Could be styled differently in the future
-                self.state.push_delta(&format!("💭 {}", delta));
+                self.state.push_delta(&format!("💭 {delta}"));
                 Ok(self.state.drain_lines())
             }
             LlmEvent::StreamComplete => {

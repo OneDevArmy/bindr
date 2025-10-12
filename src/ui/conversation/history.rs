@@ -236,7 +236,7 @@ impl ConversationHistory {
         let mut current_line = String::new();
 
         for word in text.split_whitespace() {
-            if current_line.len() + word.len() + 1 <= width {
+            if current_line.len() + word.len() < width {
                 if !current_line.is_empty() {
                     current_line.push(' ');
                 }

@@ -1,10 +1,10 @@
 [package]
 name = "bindr"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-authors = ["Your Name "]
+authors = ["OneDevArmy "]
 description = "Multi-agent LLM workflow orchestration for builders"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/OneDevArmy/bindr"
 readme = "README.md"
 keywords = ["cli", "llm", "workflow", "ai", "agent"]

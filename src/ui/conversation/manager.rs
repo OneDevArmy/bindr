@@ -220,7 +220,7 @@ impl ConversationManager {
                             }
                             LlmEvent::Error(error) => {
                                 self.history.add_system_message(
-                                    format!("Error: {}", error),
+                                    format!("Error: {error}"),
                                     self.current_mode,
                                 );
                                 self.clear_stream_state();
@@ -557,7 +557,7 @@ impl ConversationManager {
                             self.pending_tools[idx].id
                         } else {
                             self.history.add_system_message(
-                                format!("No pending tool at position {}", index),
+                                format!("No pending tool at position {index}"),
                                 self.current_mode,
                             );
                             return Ok(ConversationAction::None);
@@ -581,19 +581,17 @@ impl ConversationManager {
                         self.current_mode,
                     );
                     self.log_activity(format!("❌ Failed to approve tool: {err}"));
-                } else {
-                    if let Some(pos) = self
-                        .pending_tools
-                        .iter()
-                        .position(|item| item.id == target_id)
-                    {
-                        let item = self.pending_tools.remove(pos);
-                        self.history.add_system_message(
-                            format!("Approved {}", item.summary),
-                            self.current_mode,
-                        );
-                        self.log_activity(format!("✅ Approved {}", item.summary));
-                    }
+                } else if let Some(pos) = self
+                    .pending_tools
+                    .iter()
+                    .position(|item| item.id == target_id)
+                {
+                    let item = self.pending_tools.remove(pos);
+                    self.history.add_system_message(
+                        format!("Approved {}", item.summary),
+                        self.current_mode,
+                    );
+                    self.log_activity(format!("✅ Approved {}", item.summary));
                 }
 
                 Ok(ConversationAction::None)

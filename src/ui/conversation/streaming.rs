@@ -126,7 +126,7 @@ impl Widget for StreamingResponse {
             return;
         }
 
-        let mut y_offset = 0;
+        let mut y_offset: u16 = 0;
 
         // Render streaming indicator with animated dots
         if self.is_streaming {
@@ -149,7 +149,7 @@ impl Widget for StreamingResponse {
                 Span::styled(dots, Style::default().fg(Color::Yellow)),
             ]);
             buf.set_line(area.x, area.y + y_offset, &indicator, area.width);
-            y_offset += 1;
+            y_offset = y_offset.saturating_add(1);
         }
 
         // Render current response content
@@ -164,8 +164,8 @@ impl Widget for StreamingResponse {
                         Span::raw("  "),
                         Span::styled(line, Style::default().fg(Color::Green)),
                     ]);
-                    buf.set_line(area.x, area.y + y_offset as u16, &response_line, area.width);
-                    y_offset += 1;
+                    buf.set_line(area.x, area.y + y_offset, &response_line, area.width);
+                    y_offset = y_offset.saturating_add(1);
                 }
             }
         }
@@ -189,7 +189,7 @@ impl Widget for StreamingResponse {
                 Span::raw("  "),
                 Span::styled(cursor_char, Style::default().fg(Color::Green)),
             ]);
-            buf.set_line(area.x, area.y + y_offset as u16, &cursor_line, area.width);
+            buf.set_line(area.x, area.y + y_offset, &cursor_line, area.width);
         }
     }
 }
@@ -205,7 +205,7 @@ impl StreamingResponse {
         let mut current_line = String::new();
 
         for word in text.split_whitespace() {
-            if current_line.len() + word.len() + 1 <= width {
+            if current_line.len() + word.len() < width {
                 if !current_line.is_empty() {
                     current_line.push(' ');
                 }

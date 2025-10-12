@@ -19,19 +19,10 @@ pub enum ConversationResult {
 }
 
 /// State for the text area within the composer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TextAreaState {
     pub content: String,
     pub cursor_position: usize,
-}
-
-impl Default for TextAreaState {
-    fn default() -> Self {
-        Self {
-            content: String::new(),
-            cursor_position: 0,
-        }
-    }
 }
 
 /// Conversation composer for user input
@@ -111,10 +102,10 @@ impl ConversationComposer {
                 }
             }
             KeyCode::Tab => {
-                if self.show_command_palette.get() {
-                    if self.apply_selected_command(&mut state) {
-                        return ConversationResult::None;
-                    }
+                if self.show_command_palette.get()
+                    && self.apply_selected_command(&mut state)
+                {
+                    return ConversationResult::None;
                 }
             }
             KeyCode::Char(c) => {
@@ -141,24 +132,20 @@ impl ConversationComposer {
                 }
             }
             KeyCode::Backspace => {
-                if self.backspace(&mut state) {
-                    if self.show_command_palette.get() {
-                        if state.content.starts_with('/') {
-                            self.refresh_command_palette(&state);
-                        } else {
-                            self.close_command_palette();
-                        }
+                if self.backspace(&mut state) && self.show_command_palette.get() {
+                    if state.content.starts_with('/') {
+                        self.refresh_command_palette(&state);
+                    } else {
+                        self.close_command_palette();
                     }
                 }
             }
             KeyCode::Delete => {
-                if self.delete(&mut state) {
-                    if self.show_command_palette.get() {
-                        if state.content.starts_with('/') {
-                            self.refresh_command_palette(&state);
-                        } else {
-                            self.close_command_palette();
-                        }
+                if self.delete(&mut state) && self.show_command_palette.get() {
+                    if state.content.starts_with('/') {
+                        self.refresh_command_palette(&state);
+                    } else {
+                        self.close_command_palette();
                     }
                 }
             }
@@ -343,7 +330,7 @@ impl Widget for ConversationComposer {
             let palette_height = (filtered.len().min(5) + 2) as u16;
             let palette_area = Rect {
                 x: inner_area.x,
-                y: inner_area.y.saturating_sub(palette_height).max(0),
+                y: inner_area.y.saturating_sub(palette_height),
                 width: inner_area.width,
                 height: palette_height,
             };

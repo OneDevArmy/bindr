@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             if let Err(e) = runtime::run_tui().await {
-                eprintln!("Error running TUI: {}", e);
+                eprintln!("Error running TUI: {e}");
                 std::process::exit(1);
             }
         }

@@ -87,15 +87,15 @@ pub async fn open_project(name: &str) -> anyhow::Result<()> {
     match session_manager.open_project(name) {
         Ok(session_id) => {
             info!(project = name, session_id = %session_id, "project opened successfully");
-            println!("📂 Opening project: {}", name);
-            println!("Session ID: {}", session_id);
+            println!("📂 Opening project: {name}");
+            println!("Session ID: {session_id}");
             println!(
                 "💡 In future versions, this will launch the TUI for the project's current mode."
             );
         }
         Err(e) => {
             error!(project = name, error = %e, "failed to open project");
-            println!("❌ Failed to open project '{}': {}", name, e);
+            println!("❌ Failed to open project '{name}': {e}");
         }
     }
 
@@ -107,12 +107,12 @@ pub async fn run_tui() -> Result<(), io::Error> {
 
     let config = Config::load().map_err(|e| {
         error!(error = %e, "failed to load configuration");
-        io::Error::new(io::ErrorKind::Other, e)
+        io::Error::other(e)
     })?;
     let mut session_manager = SessionManager::new(config.clone());
     session_manager.load_sessions().map_err(|e| {
         error!(error = %e, "failed to load sessions");
-        io::Error::new(io::ErrorKind::Other, e)
+        io::Error::other(e)
     })?;
 
     enable_raw_mode()?;
@@ -123,7 +123,7 @@ pub async fn run_tui() -> Result<(), io::Error> {
 
     let mut app = App::new(config, session_manager).await.map_err(|err| {
         error!(error = %err, "failed to initialize app state");
-        io::Error::new(io::ErrorKind::Other, err)
+        io::Error::other(err)
     })?;
     let res = app::run_app(&mut terminal, &mut app).await;
 
@@ -139,7 +139,7 @@ pub async fn run_tui() -> Result<(), io::Error> {
 
     if let Err(err) = res {
         error!(error = %err, "TUI exited with error");
-        println!("Error: {:?}", err);
+        println!("Error: {err:?}");
     }
 
     info!("TUI runtime shutdown complete");

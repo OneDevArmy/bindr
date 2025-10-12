@@ -249,13 +249,13 @@ fn build_context_summary(history: &[ConversationEntry]) -> Option<String> {
 
     let mut parts = Vec::new();
     if let Some(text) = brainstorm {
-        parts.push(format!("Brainstorming: {}", text));
+        parts.push(format!("Brainstorming: {text}"));
     }
     if let Some(text) = plan {
-        parts.push(format!("Planning: {}", text));
+        parts.push(format!("Planning: {text}"));
     }
     if let Some(text) = execute {
-        parts.push(format!("Execution: {}", text));
+        parts.push(format!("Execution: {text}"));
     }
 
     if parts.is_empty() {

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use dirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -40,7 +39,7 @@ pub struct Config {
 }
 
 /// Configuration file structure for TOML
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigToml {
     /// Selected provider
     pub selected_provider: Option<String>,
@@ -539,7 +538,7 @@ impl Config {
                         .map(|model_toml| ModelInfo {
                             id: model_toml.id,
                             name: model_toml.name,
-                            description: model_toml.description.unwrap_or_else(|| "".to_string()),
+                            description: model_toml.description.unwrap_or_default(),
                             is_premium: false, // Default to false for loaded models
                         })
                         .collect();
@@ -865,18 +864,6 @@ impl Config {
                 show_emojis: Some(self.ui.show_usage_counter),
                 max_history_lines: Some(self.ui.auto_save_interval as usize),
             }),
-        }
-    }
-}
-
-impl Default for ConfigToml {
-    fn default() -> Self {
-        Self {
-            selected_provider: None,
-            default_model: None,
-            api_keys: None,
-            model_providers: None,
-            ui: None,
         }
     }
 }

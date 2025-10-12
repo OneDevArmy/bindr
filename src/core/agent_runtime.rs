@@ -344,44 +344,45 @@ async fn process_kernel_event(
     tool_executor: &Arc<ToolExecutor>,
     event: KernelEvent,
 ) -> Result<()> {
-    if let KernelEvent::AgentNotification { notification, .. } = event {
-        if let AgentNotification::Structured { label, payload } = notification {
-            match label.as_str() {
-                "tool:invoke" => {
-                    handle_tool_invoke(state, pending_tools, kernel, tool_executor, payload)
-                        .await?;
-                }
-                "conversation:user_message" => {
-                    persist_conversation_entry(state, &payload, ConversationRole::User).await?;
-                }
-                "conversation:assistant_message" => {
-                    persist_conversation_entry(state, &payload, ConversationRole::Assistant)
-                        .await?;
-                    let mut guard = state.lock().await;
-                    if let Err(err) = guard.session_manager.save_current_session() {
-                        warn!("failed to save session after assistant response: {err}");
-                    }
-                }
-                "tool:result" => {
-                    if let Some(summary) = payload.get("summary").and_then(|v| v.as_str()) {
-                        let mode = payload
-                            .get("mode")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or(BindrMode::Execute);
-                        log_system_message(state, mode, summary).await?;
-                    }
-                }
-                "tool:error" => {
-                    if let Some(message) = payload.get("error").and_then(|v| v.as_str()) {
-                        let mode = payload
-                            .get("mode")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or(BindrMode::Execute);
-                        log_system_message(state, mode, &format!("Tool error: {message}")).await?;
-                    }
-                }
-                _ => {}
+    if let KernelEvent::AgentNotification {
+        notification: AgentNotification::Structured { label, payload },
+        ..
+    } = event
+    {
+        match label.as_str() {
+            "tool:invoke" => {
+                handle_tool_invoke(state, pending_tools, kernel, tool_executor, payload).await?;
             }
+            "conversation:user_message" => {
+                persist_conversation_entry(state, &payload, ConversationRole::User).await?;
+            }
+            "conversation:assistant_message" => {
+                persist_conversation_entry(state, &payload, ConversationRole::Assistant).await?;
+                let mut guard = state.lock().await;
+                if let Err(err) = guard.session_manager.save_current_session() {
+                    warn!("failed to save session after assistant response: {err}");
+                }
+            }
+            "tool:result" => {
+                if let Some(summary) = payload.get("summary").and_then(|v| v.as_str()) {
+                    let mode = payload
+                        .get("mode")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or(BindrMode::Execute);
+                    log_system_message(state, mode, summary).await?;
+                }
+            }
+            "tool:error" => {
+                if let Some(message) = payload.get("error").and_then(|v| v.as_str()) {
+                    let mode = payload
+                        .get("mode")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or(BindrMode::Execute);
+                    let error_message = format!("Tool error: {message}");
+                    log_system_message(state, mode, error_message).await?;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -403,7 +404,9 @@ async fn handle_tool_invoke(
         .ok_or_else(|| anyhow!("tool invoke payload missing mode"))?;
     let invocation = build_tool_invocation(mode, &call.tool, &call.args)?;
 
-    log_system_message(state, mode, &format!("Invoking tool `{}`", call.tool)).await?;
+    let tool_name = call.tool.as_str();
+    let invoke_message = format!("Invoking tool `{tool_name}`");
+    log_system_message(state, mode, invoke_message).await?;
 
     let outcome = ToolDispatcher::review(mode, invocation.clone())?;
 
@@ -548,14 +551,12 @@ async fn persist_conversation_entry(
 async fn log_system_message(
     state: &SharedRuntimeState,
     mode: BindrMode,
-    message: &str,
+    message: impl Into<String>,
 ) -> Result<()> {
     let mut guard = state.lock().await;
-    guard.session_manager.add_conversation_entry(
-        ConversationRole::System,
-        message.to_string(),
-        mode,
-    )?;
+    guard
+        .session_manager
+        .add_conversation_entry(ConversationRole::System, message.into(), mode)?;
     Ok(())
 }
 
@@ -707,7 +708,7 @@ fn build_tool_invocation(mode: BindrMode, tool: &str, args: &Value) -> Result<To
                     allow_network,
                 }),
                 mode,
-                format!("Run command `{}`", command),
+                format!("Run command `{command}`"),
             )
         }
         "web_search" => {
@@ -725,7 +726,7 @@ fn build_tool_invocation(mode: BindrMode, tool: &str, args: &Value) -> Result<To
                     max_results,
                 }),
                 mode,
-                format!("Search the web for \"{}\"", query),
+                format!("Search the web for \"{query}\""),
             )
         }
         other => return Err(anyhow!("unknown tool `{other}`")),

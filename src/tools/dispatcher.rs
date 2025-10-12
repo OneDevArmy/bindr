@@ -15,9 +15,7 @@ impl ToolDispatcher {
 
         if !capabilities.allowed_tools.contains(&kind) {
             return Err(anyhow!(
-                "Tool {:?} is not permitted in {:?} mode",
-                kind,
-                mode
+                "Tool {kind:?} is not permitted in {mode:?} mode"
             ));
         }
 
@@ -32,6 +30,6 @@ impl ToolDispatcher {
     pub fn capabilities_for(mode: BindrMode) -> Result<&'static ModeCapabilities> {
         MODE_CAPABILITIES
             .get(&mode)
-            .ok_or_else(|| anyhow!("No capabilities registered for mode {:?}", mode))
+            .ok_or_else(|| anyhow!("No capabilities registered for mode {mode:?}"))
     }
 }
